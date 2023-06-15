@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/poweruser/junda.feng/CUDA-INT8-GEMM/build",
+  "command": "/home/poweruser/junda.feng/anaconda3/bin/nvcc -forward-unknown-to-host-compiler  --options-file CMakeFiles/test_gemm_i8.dir/includes_CUDA.rsp -ccbin=/usr/bin/c++ -gencode code=sm_86,arch=compute_86 --expt-extended-lambda --expt-relaxed-constexpr --keep --verbose --compiler-options -fPIC -g -v -G -Xcompiler -Wall -std=c++14 --generate-code=arch=compute_86,code=[compute_86,sm_86] -Xcompiler=-fPIE -x cu -c /home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu -o CMakeFiles/test_gemm_i8.dir/test_gemm_i8.cu.o",
+  "file": "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu",
+  "output": "CMakeFiles/test_gemm_i8.dir/test_gemm_i8.cu.o"
+}
+]

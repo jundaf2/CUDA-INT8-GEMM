@@ -1,0 +1,1 @@
+/usr/bin/c++ @CMakeFiles/test_gemm_i8.dir/objects1.rsp -o test_gemm_i8 @CMakeFiles/test_gemm_i8.dir/linkLibs.rsp -L"/home/poweruser/junda.feng/anaconda3/lib/stubs" -L"/home/poweruser/junda.feng/anaconda3/lib"
