@@ -70459,6 +70459,15 @@ void print_vec(const int8_t *outv, std::string outn, int start, int end, int row
   }
   std::cout << std::endl;
 }
+
+void print_vec(const int *outv, std::string outn, int start, int end, int row_size) {
+  std::cout << outn << ": ";
+  for(int i=start; i<end; i++) {
+    std::cout << static_cast<float>(outv[i]) << " ";
+    if((i-start+1)%row_size==0) std::cout << std::endl;
+  }
+  std::cout << std::endl;
+}
 # 16 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 2
 # 1 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/gemm_i8.cuh" 1
        
@@ -109233,6 +109242,110 @@ namespace cg = cooperative_groups;
 
 namespace kernel{
 
+
+template <int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int WARP_SIZE_M, int WARP_SIZE_N, int STAGE, bool NoTransA, bool NoTransB, bool RowMajorC>
+__attribute__((global)) void GEMMI8TCU(const int8_t* A, const int8_t* B, int* C, int M, int N, int K)
+{
+  auto grid = cg::this_grid();
+  auto block = cg::this_thread_block();
+  cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(block);
+
+  int warp_id = tile32.meta_group_rank();
+  int lane_id = tile32.thread_rank();
+
+  constexpr int WARP_SIZE = 32;
+  constexpr int TC_SIZE = 16;
+  constexpr int WAPR_NUM_N = BLOCK_SIZE_N / WARP_SIZE_N;
+  constexpr int WAPR_NUM_M = BLOCK_SIZE_M / WARP_SIZE_M;
+  constexpr int WAPR_NUM = WAPR_NUM_M * WAPR_NUM_N;
+
+  static_assert(NoTransA == GEMM_OP_T, "NoTransA == GEMM_OP_T");
+  static_assert(NoTransB == GEMM_OP_N, "NoTransB == GEMM_OP_N");
+  static_assert(RowMajorC == GEMM_OP_T, "RowMajorC == GEMM_OP_T");
+
+  __attribute__((shared)) int8_t SLB[STAGE * (BLOCK_SIZE_K*BLOCK_SIZE_M + BLOCK_SIZE_K*BLOCK_SIZE_N)];
+
+  int8_t* smem_a[2];
+  int8_t* smem_b[2];
+
+  smem_a[0] = SLB;
+  smem_a[1] = SLB + BLOCK_SIZE_K*BLOCK_SIZE_M;
+  smem_b[0] = SLB + STAGE*BLOCK_SIZE_K*BLOCK_SIZE_M;
+  smem_b[1] = SLB + STAGE*BLOCK_SIZE_K*BLOCK_SIZE_M + BLOCK_SIZE_K*BLOCK_SIZE_N;
+
+  const int BCM = BLOCK_SIZE_M * blockIdx.y;
+  const int BCN = BLOCK_SIZE_N * blockIdx.x;
+
+  const int LDA = NoTransA ? K : M;
+  const int LDB = NoTransB ? N : K;
+  const int LDC = RowMajorC ? N : M;
+
+  const int WCM = warp_id / WAPR_NUM_N;
+  const int WCN = warp_id % WAPR_NUM_N;
+
+  const int BLOCK_K_LOOP = K / BLOCK_SIZE_K;
+
+  const int8_t* BA = A + BCM * LDA;
+  const int8_t* BB = B + BCN * LDB;
+  int* BC = C + BCM * LDC + BCN;
+  int* BWC = BC + WCM * WARP_SIZE_M * LDC + WCN * WARP_SIZE_N;
+
+  constexpr int WARP_M_LOOP = WARP_SIZE_M / TC_SIZE;
+  constexpr int WARP_N_LOOP = WARP_SIZE_N / TC_SIZE;
+  constexpr int WARP_K_LOOP = BLOCK_SIZE_K / TC_SIZE;
+
+  wmma::fragment<wmma::matrix_a, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::row_major> frag_a[WARP_M_LOOP][WARP_K_LOOP];
+  wmma::fragment<wmma::matrix_b, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::col_major> frag_b[WARP_K_LOOP][WARP_N_LOOP];
+  wmma::fragment<wmma::accumulator, TC_SIZE, TC_SIZE, TC_SIZE, int> frag_c[WARP_M_LOOP][WARP_N_LOOP];
+
+#pragma unroll
+  for (int i = 0; i < WARP_M_LOOP; i++) {
+#pragma unroll
+      for (int j = 0; j < WARP_N_LOOP; j++) {
+          wmma::fill_fragment(frag_c[i][j], 0);
+      }
+  }
+
+  constexpr int WARP_SIZE_X = 2;
+  int lane_id_x = lane_id % (WARP_SIZE_X);
+  int lane_id_y = lane_id / (WARP_SIZE_X);
+
+  for(int k=0; k<BLOCK_K_LOOP; k++){
+    const auto* load_gmem_addr_a = BA + (warp_id*TC_SIZE + lane_id_y) * LDA + k*BLOCK_SIZE_K + lane_id_x*16;
+    const auto* load_gmem_addr_b = BB + (warp_id*TC_SIZE + lane_id_y) * LDB + k*BLOCK_SIZE_K + lane_id_x*16;
+
+    int store_smem_addr_a = __cvta_generic_to_shared(smem_a[k%2] + (warp_id*TC_SIZE + lane_id_y)*BLOCK_SIZE_K + lane_id_x*16);
+    int store_smem_addr_b = __cvta_generic_to_shared(smem_b[k%2] + (warp_id*TC_SIZE + lane_id_y)*BLOCK_SIZE_K + lane_id_x*16);
+
+    asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" :: "r"(store_smem_addr_a), "l"(load_gmem_addr_a), "n"(16));
+    asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" :: "r"(store_smem_addr_b), "l"(load_gmem_addr_b), "n"(16));
+
+    asm ("cp.async.commit_group;\n" ::);
+    asm ("cp.async.wait_group 0;\n" ::);
+    __syncthreads();
+
+
+    for(int ki=0; ki<WARP_K_LOOP; ki++)
+      for(int yi=0; yi<WARP_M_LOOP; yi++){
+        wmma::load_matrix_sync(frag_a[yi][ki], &smem_a[k%2][(WCM*WARP_SIZE_M+yi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+        for(int xi=0; xi<WARP_N_LOOP; xi++){
+          wmma::load_matrix_sync(frag_b[ki][xi], &smem_b[k%2][(WCN*WARP_SIZE_N+xi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+          wmma::mma_sync(frag_c[yi][xi], frag_a[yi][ki], frag_b[ki][xi], frag_c[yi][xi]);
+        }
+      }
+  }
+
+
+#pragma unroll
+  for(int yi=0; yi<WARP_M_LOOP; yi++){
+#pragma unroll
+    for(int xi=0; xi<WARP_N_LOOP; xi++){
+        wmma::store_matrix_sync(BWC + (yi*TC_SIZE)*LDC + xi*TC_SIZE, frag_c[yi][xi], LDC, wmma::mem_row_major);
+    }
+  }
+
+}
+
 template <int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int WARP_SIZE_M, int WARP_SIZE_N, int STAGE, bool NoTransA, bool NoTransB, bool RowMajorC>
 __attribute__((global)) void GEMMI8TCU(const int8_t* A, const int8_t* B, int8_t* C, int M, int N, int K)
 {
@@ -109284,32 +109397,28 @@ __attribute__((global)) void GEMMI8TCU(const int8_t* A, const int8_t* B, int8_t*
   constexpr int WARP_N_LOOP = WARP_SIZE_N / TC_SIZE;
   constexpr int WARP_K_LOOP = BLOCK_SIZE_K / TC_SIZE;
 
-  wmma::fragment<wmma::matrix_a, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::row_major> frag_a[4][4];
-  wmma::fragment<wmma::matrix_b, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::col_major> frag_b[4][4];
-  wmma::fragment<wmma::accumulator, TC_SIZE, TC_SIZE, TC_SIZE, int> frag_c[4][4];
+  wmma::fragment<wmma::matrix_a, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::row_major> frag_a[WARP_M_LOOP][WARP_K_LOOP];
+  wmma::fragment<wmma::matrix_b, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::col_major> frag_b[WARP_K_LOOP][WARP_N_LOOP];
+  wmma::fragment<wmma::accumulator, TC_SIZE, TC_SIZE, TC_SIZE, int> frag_c[WARP_M_LOOP][WARP_N_LOOP];
 
 #pragma unroll
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < WARP_M_LOOP; i++) {
 #pragma unroll
-      for (int j = 0; j < 4; j++) {
+      for (int j = 0; j < WARP_N_LOOP; j++) {
           wmma::fill_fragment(frag_c[i][j], 0);
       }
   }
 
-  constexpr int WARP_SIZE_X = 4;
+  constexpr int WARP_SIZE_X = 2;
   int lane_id_x = lane_id % (WARP_SIZE_X);
   int lane_id_y = lane_id / (WARP_SIZE_X);
-  int smem_lane_id_x = lane_id / TC_SIZE;
-  int smem_lane_id_y = lane_id % TC_SIZE;
-  int gmem_lane_id_x = lane_id % (TC_SIZE / 8);
-  int gmem_lane_id_y = lane_id / (TC_SIZE / 8);
 
   for(int k=0; k<BLOCK_K_LOOP; k++){
-    const auto* load_gmem_addr_a = BA + (warp_id*TC_SIZE + gmem_lane_id_y) * LDA + k*BLOCK_SIZE_K + gmem_lane_id_x*16;
-    const auto* load_gmem_addr_b = BB + (warp_id*TC_SIZE + gmem_lane_id_y) * LDB + k*BLOCK_SIZE_K + gmem_lane_id_x*16;
+    const auto* load_gmem_addr_a = BA + (warp_id*TC_SIZE + lane_id_y) * LDA + k*BLOCK_SIZE_K + lane_id_x*16;
+    const auto* load_gmem_addr_b = BB + (warp_id*TC_SIZE + lane_id_y) * LDB + k*BLOCK_SIZE_K + lane_id_x*16;
 
-    int store_smem_addr_a = __cvta_generic_to_shared(smem_a[k%2] + (warp_id*TC_SIZE + smem_lane_id_y)*BLOCK_SIZE_K + smem_lane_id_x*16);
-    int store_smem_addr_b = __cvta_generic_to_shared(smem_b[k%2] + (warp_id*TC_SIZE + smem_lane_id_y)*BLOCK_SIZE_K + smem_lane_id_x*16);
+    int store_smem_addr_a = __cvta_generic_to_shared(smem_a[k%2] + (warp_id*TC_SIZE + lane_id_y)*BLOCK_SIZE_K + lane_id_x*16);
+    int store_smem_addr_b = __cvta_generic_to_shared(smem_b[k%2] + (warp_id*TC_SIZE + lane_id_y)*BLOCK_SIZE_K + lane_id_x*16);
 
     asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" :: "r"(store_smem_addr_a), "l"(load_gmem_addr_a), "n"(16));
     asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" :: "r"(store_smem_addr_b), "l"(load_gmem_addr_b), "n"(16));
@@ -109321,25 +109430,36 @@ __attribute__((global)) void GEMMI8TCU(const int8_t* A, const int8_t* B, int8_t*
 
     for(int ki=0; ki<WARP_K_LOOP; ki++)
       for(int yi=0; yi<WARP_M_LOOP; yi++){
-        wmma::load_matrix_sync(frag_a[yi][ki], &smem_a[k%2][(WCM*WARP_SIZE_M)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+        wmma::load_matrix_sync(frag_a[yi][ki], &smem_a[k%2][(WCM*WARP_SIZE_M+yi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
         for(int xi=0; xi<WARP_N_LOOP; xi++){
-          wmma::load_matrix_sync(frag_b[ki][xi], &smem_b[k%2][(WCN*WARP_SIZE_N)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+          wmma::load_matrix_sync(frag_b[ki][xi], &smem_b[k%2][(WCN*WARP_SIZE_N+xi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
           wmma::mma_sync(frag_c[yi][xi], frag_a[yi][ki], frag_b[ki][xi], frag_c[yi][xi]);
         }
       }
   }
 
-
+  int gmem_lane_id_x = lane_id % 4;
+  int gmem_lane_id_y = lane_id / 4;
 #pragma unroll
   for(int yi=0; yi<WARP_M_LOOP; yi++)
 #pragma unroll
     for(int xi=0; xi<WARP_N_LOOP; xi++)
     {
-      auto* store_gmem_addr = reinterpret_cast<uint2*>(BWC + (yi*TC_SIZE + gmem_lane_id_y) * LDC + xi*TC_SIZE + gmem_lane_id_x*8);
-      uint2 tmp_vr;
-      tmp_vr.x = frag_c[yi][xi].x[0] + (frag_c[yi][xi].x[1] << 8) + (frag_c[yi][xi].x[2] << 16) + (frag_c[yi][xi].x[3] << 24);
-      tmp_vr.y = frag_c[yi][xi].x[4] + (frag_c[yi][xi].x[5] << 8) + (frag_c[yi][xi].x[6] << 16) + (frag_c[yi][xi].x[7] << 24);
-      *store_gmem_addr = tmp_vr;
+      int8_t tmp_char[8];
+#pragma unroll
+      for(int i=0;i<8;i++) {
+        tmp_char[i] = static_cast<int8_t>(frag_c[yi][xi].x[i]);
+      }
+
+      for(int tc_yi=0; tc_yi<2; tc_yi++){
+        for(int tc_xi=0; tc_xi<2; tc_xi++){
+          auto* store_gmem_addr = reinterpret_cast<char2*>(BWC + (yi*TC_SIZE + tc_yi*TC_SIZE/2 + gmem_lane_id_y) * LDC + xi*TC_SIZE + tc_xi*TC_SIZE/2 + gmem_lane_id_x*2);
+          char2 tmp_char2;
+          tmp_char2.x = tmp_char[tc_xi*4+tc_yi*2+0];
+          tmp_char2.y = tmp_char[tc_xi*4+tc_yi*2+1];
+          *store_gmem_addr = tmp_char2;
+        }
+      }
     }
 }
 
@@ -109350,9 +109470,9 @@ __attribute__((global)) void GEMMI8TCU(const int8_t* A, const int8_t* B, int8_t*
 using namespace std;
 
 
-template <bool use_tcu>
+template <bool use_tcu, typename T>
 void GEMMI8(cudaStream_t stream,
-            const int8_t *A, const int8_t *B, int8_t *C,
+            const int8_t *A, const int8_t *B, T *C,
             int M, int N, int K,
             bool transA, bool transB, bool transC)
 {
@@ -109372,10 +109492,12 @@ void GEMMI8(cudaStream_t stream,
 }
 
 
+template <typename T>
 class GEMM {
 public:
   GEMM(bool use_tcu, int m, int n, int k, bool transa, bool transb, bool transc) {
     this->use_tcu = use_tcu;
+
     this->M = m;
     this->N = n;
     this->K = k;
@@ -109389,7 +109511,8 @@ public:
     this->trans_c = transc;
 
     cout << "compute type=int32" << ", "
-          << "data type=int8" << ", "
+          << "input data type=int8" << ", "
+          << "output data type=" << (std::is_same<T,int8_t>::value ? "int8" : "int32") << ", "
           << "use_tcu=" << use_tcu << ", "
           << "M=" << m << ", "
           << "N=" << n << ", "
@@ -109408,20 +109531,21 @@ public:
 
     h_mat_A = vector<int8_t>(len_a, 0);
     h_mat_B = vector<int8_t>(len_b, 0);
-    h_mat_C = vector<int8_t>(len_c, 0);
-    h_mat_C_ref = vector<int8_t>(len_c, 0);
+    h_mat_C = vector<T>(len_c, 0);
+    h_mat_C_ref = vector<T>(len_c, 0);
 
     std::uniform_int_distribution<> uniform_char_distribution(
-# 82 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 85 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
                                                              (-0x7f - 1)
-# 82 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 85 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
                                                                      , 0x7f);
 
     auto rand_gen = std::bind(uniform_char_distribution, generator);
     auto const_gen = []() { return 1; };
+    auto pattern_gen = []() { static int i = 0; return (i++)/32%64; };
 
-    generate_n(h_mat_A.begin(), len_a, const_gen);
-    generate_n(h_mat_B.begin(), len_b, const_gen);
+    generate_n(h_mat_A.begin(), len_a, rand_gen);
+    generate_n(h_mat_B.begin(), len_b, rand_gen);
 
   }
 
@@ -109429,106 +109553,106 @@ public:
   void testGEMM() {
     cudaStream_t stream;
     
-# 95 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 99 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    (static_cast <bool> (
-# 95 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 99 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
    cudaSuccess==cudaStreamCreate(&stream)
-# 95 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 99 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    ) ? void (0) : __assert_fail (
-# 95 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 99 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
    "cudaSuccess==cudaStreamCreate(&stream)"
-# 95 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 95, __extension__ __PRETTY_FUNCTION__))
-# 95 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 99 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 99, __extension__ __PRETTY_FUNCTION__))
+# 99 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
                                          ;
 
 
     {
-      cpuGEMM<float, float, int8_t, int8_t>(
+      cpuGEMM<float, float, int8_t, T>(
           h_mat_A.data(), h_mat_B.data(), h_mat_C_ref.data(), M, N, K,
           len_a, len_b, len_c, 1, static_cast<float>(1), static_cast<float>(0),
           GEMM_OP_T, GEMM_OP_N, GEMM_OP_T);
     }
 
     
-# 105 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    (static_cast <bool> (
-# 105 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
    cudaSuccess==cudaMalloc(&d_mat_A, len_a * sizeof(int8_t))
-# 105 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    ) ? void (0) : __assert_fail (
-# 105 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
    "cudaSuccess==cudaMalloc(&d_mat_A, len_a * sizeof(int8_t))"
-# 105 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 105, __extension__ __PRETTY_FUNCTION__))
-# 105 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                                            ;
-    
-# 106 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   (static_cast <bool> (
-# 106 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaMalloc(&d_mat_B, len_b * sizeof(int8_t))
-# 106 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   ) ? void (0) : __assert_fail (
-# 106 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaMalloc(&d_mat_B, len_b * sizeof(int8_t))"
-# 106 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 106, __extension__ __PRETTY_FUNCTION__))
-# 106 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                                            ;
-    
-# 107 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   (static_cast <bool> (
-# 107 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaMalloc(&d_mat_C, len_c * sizeof(int8_t))
-# 107 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   ) ? void (0) : __assert_fail (
-# 107 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaMalloc(&d_mat_C, len_c * sizeof(int8_t))"
-# 107 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 107, __extension__ __PRETTY_FUNCTION__))
-# 107 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                                            ;
-
-    
-# 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   (static_cast <bool> (
-# 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaMemcpy(d_mat_A, h_mat_A.data(), len_a * sizeof(int8_t), cudaMemcpyHostToDevice)
-# 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   ) ? void (0) : __assert_fail (
-# 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaMemcpy(d_mat_A, h_mat_A.data(), len_a * sizeof(int8_t), cudaMemcpyHostToDevice)"
 # 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 109, __extension__ __PRETTY_FUNCTION__))
 # 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                                                                                   ;
+                                                            ;
     
 # 110 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    (static_cast <bool> (
 # 110 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaMemcpy(d_mat_B, h_mat_B.data(), len_b * sizeof(int8_t), cudaMemcpyHostToDevice)
+   cudaSuccess==cudaMalloc(&d_mat_B, len_b * sizeof(int8_t))
 # 110 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    ) ? void (0) : __assert_fail (
 # 110 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaMemcpy(d_mat_B, h_mat_B.data(), len_b * sizeof(int8_t), cudaMemcpyHostToDevice)"
+   "cudaSuccess==cudaMalloc(&d_mat_B, len_b * sizeof(int8_t))"
 # 110 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 110, __extension__ __PRETTY_FUNCTION__))
 # 110 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                                                                                   ;
+                                                            ;
     
 # 111 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    (static_cast <bool> (
 # 111 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaMemset(d_mat_C, 0, len_c * sizeof(int8_t))
+   cudaSuccess==cudaMalloc(&d_mat_C, len_c * sizeof(T))
 # 111 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    ) ? void (0) : __assert_fail (
 # 111 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaMemset(d_mat_C, 0, len_c * sizeof(int8_t))"
+   "cudaSuccess==cudaMalloc(&d_mat_C, len_c * sizeof(T))"
 # 111 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 111, __extension__ __PRETTY_FUNCTION__))
 # 111 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                                              ;
+                                                       ;
+
+    
+# 113 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   (static_cast <bool> (
+# 113 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   cudaSuccess==cudaMemcpy(d_mat_A, h_mat_A.data(), len_a * sizeof(int8_t), cudaMemcpyHostToDevice)
+# 113 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   ) ? void (0) : __assert_fail (
+# 113 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   "cudaSuccess==cudaMemcpy(d_mat_A, h_mat_A.data(), len_a * sizeof(int8_t), cudaMemcpyHostToDevice)"
+# 113 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 113, __extension__ __PRETTY_FUNCTION__))
+# 113 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+                                                                                                   ;
+    
+# 114 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   (static_cast <bool> (
+# 114 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   cudaSuccess==cudaMemcpy(d_mat_B, h_mat_B.data(), len_b * sizeof(int8_t), cudaMemcpyHostToDevice)
+# 114 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   ) ? void (0) : __assert_fail (
+# 114 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   "cudaSuccess==cudaMemcpy(d_mat_B, h_mat_B.data(), len_b * sizeof(int8_t), cudaMemcpyHostToDevice)"
+# 114 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 114, __extension__ __PRETTY_FUNCTION__))
+# 114 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+                                                                                                   ;
+    
+# 115 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   (static_cast <bool> (
+# 115 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   cudaSuccess==cudaMemset(d_mat_C, 0, len_c * sizeof(T))
+# 115 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   ) ? void (0) : __assert_fail (
+# 115 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   "cudaSuccess==cudaMemset(d_mat_C, 0, len_c * sizeof(T))"
+# 115 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 115, __extension__ __PRETTY_FUNCTION__))
+# 115 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+                                                         ;
 
 
 
@@ -109540,125 +109664,125 @@ public:
     cudaEventRecord(start, stream);
 
     {
-      if(use_tcu) GEMMI8<true>(stream, d_mat_A, d_mat_B, d_mat_C, M, N, K, trans_a, trans_b, trans_c);
+      if(use_tcu) GEMMI8<true, T>(stream, d_mat_A, d_mat_B, d_mat_C, M, N, K, trans_a, trans_b, trans_c);
     }
 
     cudaEventRecord(stop, stream);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&milliseconds , start, stop);
 
-    double flops = (double)(M*N*K*2)*1.0;
+    double flops = static_cast<double>(M)*static_cast<double>(N)*static_cast<double>(K)*2*1.0;
     double gigaFlops = (flops * 1.0e-9f) / (milliseconds / 1000.0f);
-    double bandWidth = (double)(len_a+len_b+len_c)*sizeof(int8_t) / (milliseconds * 1000 * 1000);
+    double bandWidth = (static_cast<double>(len_a+len_b)*sizeof(int8_t)+static_cast<double>(len_c)*sizeof(T)) / (milliseconds * 1000 * 1000);
     printf("\033[31;47m INT8 GEMM took %.3f ms, %.2f GFlop/s, %.2f GB/s \033[0m\n", milliseconds , gigaFlops, bandWidth);
     
-# 134 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 138 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    (static_cast <bool> (
-# 134 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 138 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
    cudaSuccess==cudaDeviceSynchronize()
-# 134 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 138 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    ) ? void (0) : __assert_fail (
-# 134 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 138 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
    "cudaSuccess==cudaDeviceSynchronize()"
-# 134 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 134, __extension__ __PRETTY_FUNCTION__))
-# 134 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 138 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 138, __extension__ __PRETTY_FUNCTION__))
+# 138 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
                                        ;
     
-# 135 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    (static_cast <bool> (
-# 135 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
    cudaSuccess==cudaEventDestroy(start)
-# 135 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    ) ? void (0) : __assert_fail (
-# 135 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
    "cudaSuccess==cudaEventDestroy(start)"
-# 135 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 135, __extension__ __PRETTY_FUNCTION__))
-# 135 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                       ;
-    
-# 136 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   (static_cast <bool> (
-# 136 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaEventDestroy(stop)
-# 136 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   ) ? void (0) : __assert_fail (
-# 136 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaEventDestroy(stop)"
-# 136 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 136, __extension__ __PRETTY_FUNCTION__))
-# 136 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                      ;
-    
-# 137 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   (static_cast <bool> (
-# 137 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaMemcpy(h_mat_C.data(), d_mat_C, len_c * sizeof(int8_t), cudaMemcpyDeviceToHost)
-# 137 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   ) ? void (0) : __assert_fail (
-# 137 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaMemcpy(h_mat_C.data(), d_mat_C, len_c * sizeof(int8_t), cudaMemcpyDeviceToHost)"
-# 137 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 137, __extension__ __PRETTY_FUNCTION__))
-# 137 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                                                                                   ;
-
-    
-# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   (static_cast <bool> (
-# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaFree(d_mat_A)
-# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   ) ? void (0) : __assert_fail (
-# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaFree(d_mat_A)"
 # 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 139, __extension__ __PRETTY_FUNCTION__))
 # 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                 ;
+                                       ;
     
 # 140 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    (static_cast <bool> (
 # 140 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaFree(d_mat_B)
+   cudaSuccess==cudaEventDestroy(stop)
 # 140 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    ) ? void (0) : __assert_fail (
 # 140 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaFree(d_mat_B)"
+   "cudaSuccess==cudaEventDestroy(stop)"
 # 140 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 140, __extension__ __PRETTY_FUNCTION__))
 # 140 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-                                 ;
+                                      ;
     
 # 141 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    (static_cast <bool> (
 # 141 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaFree(d_mat_C)
+   cudaSuccess==cudaMemcpy(h_mat_C.data(), d_mat_C, len_c * sizeof(T), cudaMemcpyDeviceToHost)
 # 141 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    ) ? void (0) : __assert_fail (
 # 141 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   "cudaSuccess==cudaFree(d_mat_C)"
+   "cudaSuccess==cudaMemcpy(h_mat_C.data(), d_mat_C, len_c * sizeof(T), cudaMemcpyDeviceToHost)"
 # 141 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 141, __extension__ __PRETTY_FUNCTION__))
 # 141 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+                                                                                              ;
+
+    
+# 143 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   (static_cast <bool> (
+# 143 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   cudaSuccess==cudaFree(d_mat_A)
+# 143 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   ) ? void (0) : __assert_fail (
+# 143 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   "cudaSuccess==cudaFree(d_mat_A)"
+# 143 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 143, __extension__ __PRETTY_FUNCTION__))
+# 143 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
                                  ;
     
-# 142 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 144 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    (static_cast <bool> (
-# 142 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-   cudaSuccess==cudaStreamDestroy(stream)
-# 142 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+# 144 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   cudaSuccess==cudaFree(d_mat_B)
+# 144 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
    ) ? void (0) : __assert_fail (
-# 142 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 144 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   "cudaSuccess==cudaFree(d_mat_B)"
+# 144 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 144, __extension__ __PRETTY_FUNCTION__))
+# 144 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+                                 ;
+    
+# 145 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   (static_cast <bool> (
+# 145 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   cudaSuccess==cudaFree(d_mat_C)
+# 145 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   ) ? void (0) : __assert_fail (
+# 145 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   "cudaSuccess==cudaFree(d_mat_C)"
+# 145 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 145, __extension__ __PRETTY_FUNCTION__))
+# 145 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+                                 ;
+    
+# 146 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   (static_cast <bool> (
+# 146 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+   cudaSuccess==cudaStreamDestroy(stream)
+# 146 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   ) ? void (0) : __assert_fail (
+# 146 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
    "cudaSuccess==cudaStreamDestroy(stream)"
-# 142 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
-   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 142, __extension__ __PRETTY_FUNCTION__))
-# 142 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 146 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3 4
+   , "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 146, __extension__ __PRETTY_FUNCTION__))
+# 146 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
                                          ;
 
-    print_vec(h_mat_C.data(), "h_mat_C: ", 0, N, N);
-    print_vec(h_mat_C_ref.data(), "h_mat_C_ref: ", 0, N, N);
+    print_vec(h_mat_C.data(), "h_mat_C: ", 0, 32, N);
+    print_vec(h_mat_C_ref.data(), "h_mat_C_ref: ", 0, 32, N);
 
     if(h_mat_C == h_mat_C_ref) {
       cout << "test passed !" << endl;
@@ -109671,21 +109795,22 @@ protected:
 
   bool use_tcu;
   int M, N, K;
-  int len_a, len_b, len_c;
+  long long int len_a, len_b, len_c;
   bool trans_a, trans_b, trans_c;
 
   vector<int8_t> h_mat_A;
   vector<int8_t> h_mat_B;
-  vector<int8_t> h_mat_C;
-  vector<int8_t> h_mat_C_ref;
+  vector<T> h_mat_C;
+  vector<T> h_mat_C_ref;
 
   int8_t *d_mat_A;
   int8_t *d_mat_B;
-  int8_t *d_mat_C;
+  T *d_mat_C;
 };
 
 
 int main(int argc, char **argv) {
+
   int M = 256;
   int N = 256;
   int K = 32;
@@ -109695,6 +109820,7 @@ int main(int argc, char **argv) {
   bool trans_c = GEMM_OP_T;
 
   bool use_tcu = true;
+  bool output_i8 = true;
 
   if(argc > 1) {
     M = atoi(argv[1]);
@@ -109714,11 +109840,22 @@ int main(int argc, char **argv) {
   if(argc > 6) {
     trans_c = atoi(argv[6]);
   }
+  if(argc > 7) {
+    use_tcu = atoi(argv[7]);
+  }
+  if(argc > 8) {
+    output_i8 = atoi(argv[8]);
+  }
 
-
-
-  GEMM gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c);
-  gemm.testGEMM();
+  if(output_i8)
+  {
+    GEMM<int8_t> gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c);
+    gemm.testGEMM();
+  }
+  else{
+    GEMM<int> gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c);
+    gemm.testGEMM();
+  }
 
   return 0;
 }

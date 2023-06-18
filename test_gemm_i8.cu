@@ -18,9 +18,9 @@
 using namespace std;
 
 
-template <bool use_tcu>
+template <bool use_tcu, typename T>
 void GEMMI8(cudaStream_t stream, 
-            const int8_t *A, const int8_t *B, int8_t *C,
+            const int8_t *A, const int8_t *B, T *C,
             int M, int N, int K,
             bool transA, bool transB, bool transC) 
 {
@@ -40,10 +40,12 @@ void GEMMI8(cudaStream_t stream,
 }
 
 
+template <typename T>
 class GEMM {
 public:
   GEMM(bool use_tcu, int m, int n, int k, bool transa, bool transb, bool transc) {
     this->use_tcu = use_tcu;
+
     this->M = m;
     this->N = n;
     this->K = k;
@@ -57,7 +59,8 @@ public:
     this->trans_c = transc;
 
     cout << "compute type=int32" << ", "
-          << "data type=int8" << ", "
+          << "input data type=int8" << ", "
+          << "output data type=" << (std::is_same<T,int8_t>::value ? "int8" : "int32") << ", "
           << "use_tcu=" << use_tcu << ", "
           << "M=" << m << ", "
           << "N=" << n << ", "
@@ -76,16 +79,17 @@ public:
 
     h_mat_A = vector<int8_t>(len_a, 0);
     h_mat_B = vector<int8_t>(len_b, 0);
-    h_mat_C = vector<int8_t>(len_c, 0);
-    h_mat_C_ref = vector<int8_t>(len_c, 0);
+    h_mat_C = vector<T>(len_c, 0);
+    h_mat_C_ref = vector<T>(len_c, 0);
 
     std::uniform_int_distribution<> uniform_char_distribution(CHAR_MIN, CHAR_MAX);
 
     auto rand_gen = std::bind(uniform_char_distribution, generator);
     auto const_gen = []() { return 1; };
+    auto pattern_gen = []() { static int i = 0; return (i++)/32%64; };
 
-    generate_n(h_mat_A.begin(), len_a, const_gen);
-    generate_n(h_mat_B.begin(), len_b, const_gen);
+    generate_n(h_mat_A.begin(), len_a, rand_gen);
+    generate_n(h_mat_B.begin(), len_b, rand_gen);
 
   }
 
@@ -96,7 +100,7 @@ public:
 
     // CPU reference
     {
-      cpuGEMM<float, float, int8_t, int8_t>(
+      cpuGEMM<float, float, int8_t, T>(
           h_mat_A.data(), h_mat_B.data(), h_mat_C_ref.data(), M, N, K,
           len_a, len_b, len_c, 1, static_cast<float>(1), static_cast<float>(0), 
           GEMM_OP_T, GEMM_OP_N, GEMM_OP_T);
@@ -104,11 +108,11 @@ public:
 
     ASSERT_CUDA(cudaMalloc(&d_mat_A, len_a * sizeof(int8_t))); 
     ASSERT_CUDA(cudaMalloc(&d_mat_B, len_b * sizeof(int8_t)));
-    ASSERT_CUDA(cudaMalloc(&d_mat_C, len_c * sizeof(int8_t)));
+    ASSERT_CUDA(cudaMalloc(&d_mat_C, len_c * sizeof(T)));
 
     ASSERT_CUDA(cudaMemcpy(d_mat_A, h_mat_A.data(), len_a * sizeof(int8_t), cudaMemcpyHostToDevice)); 
     ASSERT_CUDA(cudaMemcpy(d_mat_B, h_mat_B.data(), len_b * sizeof(int8_t), cudaMemcpyHostToDevice));
-    ASSERT_CUDA(cudaMemset(d_mat_C, 0, len_c * sizeof(int8_t)));
+    ASSERT_CUDA(cudaMemset(d_mat_C, 0, len_c * sizeof(T)));
 
     // warp up the device
 
@@ -120,29 +124,29 @@ public:
     cudaEventRecord(start, stream);
 
     {  
-      if(use_tcu) GEMMI8<true>(stream, d_mat_A, d_mat_B, d_mat_C, M, N, K, trans_a, trans_b, trans_c);
+      if(use_tcu) GEMMI8<true, T>(stream, d_mat_A, d_mat_B, d_mat_C, M, N, K, trans_a, trans_b, trans_c);
     }
 
     cudaEventRecord(stop, stream);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&milliseconds , start, stop);
     
-    double   flops = (double)(M*N*K*2)*1.0;
+    double   flops = static_cast<double>(M)*static_cast<double>(N)*static_cast<double>(K)*2*1.0;
     double   gigaFlops = (flops * 1.0e-9f) / (milliseconds  / 1000.0f);
-    double   bandWidth = (double)(len_a+len_b+len_c)*sizeof(int8_t) / (milliseconds  * 1000 * 1000);
+    double   bandWidth = (static_cast<double>(len_a+len_b)*sizeof(int8_t)+static_cast<double>(len_c)*sizeof(T)) / (milliseconds  * 1000 * 1000);
     printf("\033[31;47m INT8 GEMM took %.3f ms, %.2f GFlop/s, %.2f GB/s \033[0m\n", milliseconds , gigaFlops, bandWidth);
     ASSERT_CUDA(cudaDeviceSynchronize());
     ASSERT_CUDA(cudaEventDestroy(start));
     ASSERT_CUDA(cudaEventDestroy(stop));
-    ASSERT_CUDA(cudaMemcpy(h_mat_C.data(), d_mat_C, len_c * sizeof(int8_t), cudaMemcpyDeviceToHost));
+    ASSERT_CUDA(cudaMemcpy(h_mat_C.data(), d_mat_C, len_c * sizeof(T), cudaMemcpyDeviceToHost));
     
     ASSERT_CUDA(cudaFree(d_mat_A));
     ASSERT_CUDA(cudaFree(d_mat_B));
     ASSERT_CUDA(cudaFree(d_mat_C));
     ASSERT_CUDA(cudaStreamDestroy(stream));
 
-    print_vec(h_mat_C.data(), "h_mat_C: ", 0, N, N);
-    print_vec(h_mat_C_ref.data(), "h_mat_C_ref: ", 0, N, N);
+    print_vec(h_mat_C.data(), "h_mat_C: ", 0, 32, N);
+    print_vec(h_mat_C_ref.data(), "h_mat_C_ref: ", 0, 32, N);
 
     if(h_mat_C == h_mat_C_ref) {
       cout << "test passed !" << endl;
@@ -155,21 +159,22 @@ protected:
 
   bool use_tcu;
   int M, N, K;
-  int len_a, len_b, len_c;
+  long long int len_a, len_b, len_c;
   bool trans_a, trans_b, trans_c;
 
   vector<int8_t> h_mat_A;
   vector<int8_t> h_mat_B;
-  vector<int8_t> h_mat_C;
-  vector<int8_t> h_mat_C_ref;
+  vector<T> h_mat_C;
+  vector<T> h_mat_C_ref;
 
   int8_t *d_mat_A;
   int8_t *d_mat_B;
-  int8_t *d_mat_C;
+  T *d_mat_C;
 };
 
 
 int main(int argc, char **argv) {
+  // minimum setting
   int M = 256;
   int N = 256;
   int K = 32;
@@ -179,6 +184,7 @@ int main(int argc, char **argv) {
   bool trans_c = GEMM_OP_T;
 
   bool use_tcu = true;
+  bool output_i8 = true;
 
   if(argc > 1) {
     M = atoi(argv[1]);
@@ -198,11 +204,22 @@ int main(int argc, char **argv) {
   if(argc > 6) {
     trans_c = atoi(argv[6]);
   }
+  if(argc > 7) {
+    use_tcu = atoi(argv[7]);
+  }
+  if(argc > 8) {
+    output_i8 = atoi(argv[8]);
+  }
 
-
-
-  GEMM gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c);
-  gemm.testGEMM();
+  if(output_i8)
+  {
+    GEMM<int8_t> gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c);
+    gemm.testGEMM();
+  }
+  else{
+    GEMM<int> gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c);
+    gemm.testGEMM();
+  }
 
   return 0;
 }

@@ -73925,6 +73925,22 @@ if ((((i - start) + 1) % row_size) == 0) { (std::cout << (std::endl)); }
 (std::cout << (std::endl)); 
 # 17
 } 
+# 19
+void print_vec(const int *outv, std::__cxx11::string outn, int start, int end, int row_size) { 
+# 20
+(((std::cout << outn)) << (": ")); 
+# 21
+for (int i = start; i < end; i++) { 
+# 22
+(((std::cout << (static_cast< float>(outv[i])))) << (" ")); 
+# 23
+if ((((i - start) + 1) % row_size) == 0) { (std::cout << (std::endl)); }  
+# 24
+}  
+# 25
+(std::cout << (std::endl)); 
+# 26
+} 
 # 43 "/usr/include/c++/7/bits/atomic_base.h" 3
 namespace std __attribute((__visibility__("default"))) { 
 # 63 "/usr/include/c++/7/bits/atomic_base.h" 3
@@ -117162,378 +117178,742 @@ namespace kernel {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
-# 19
-template< int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int WARP_SIZE_M, int WARP_SIZE_N, int STAGE, bool NoTransA, bool NoTransB, bool RowMajorC> static void 
 # 20
+template< int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int WARP_SIZE_M, int WARP_SIZE_N, int STAGE, bool NoTransA, bool NoTransB, bool RowMajorC> static void 
+# 21
+__wrapper__device_stub_GEMMI8TCU(const int8_t *&A, const int8_t *&B, int *&C, int &M, int &N, int &K) { ::cudaLaunchKernel(0, 0, 0, 0, 0, 0);}
+#pragma GCC diagnostic pop
+
+#if 0
+# 22
+{ 
+# 23
+auto grid = cg::this_grid(); 
+# 24
+auto block = cg::this_thread_block(); 
+# 25
+cooperative_groups::__v1::thread_block_tile< 32>  tile32 = cg::tiled_partition< 32U> (block); 
+# 27
+int warp_id = tile32.meta_group_rank(); 
+# 28
+int lane_id = tile32.thread_rank(); 
+# 30
+constexpr int WARP_SIZE = 32; 
+# 31
+constexpr int TC_SIZE = 16; 
+# 32
+constexpr int WAPR_NUM_N = (BLOCK_SIZE_N / WARP_SIZE_N); 
+# 33
+constexpr int WAPR_NUM_M = (BLOCK_SIZE_M / WARP_SIZE_M); 
+# 34
+constexpr int WAPR_NUM = (WAPR_NUM_M * WAPR_NUM_N); 
+# 36
+static_assert(((NoTransA) == GEMM_OP_T), "NoTransA == GEMM_OP_T");
+# 37
+static_assert(((NoTransB) == GEMM_OP_N), "NoTransB == GEMM_OP_N");
+# 38
+static_assert(((RowMajorC) == GEMM_OP_T), "RowMajorC == GEMM_OP_T");
+# 40
+__attribute__((unused)) static int8_t SLB[STAGE * ((BLOCK_SIZE_K * BLOCK_SIZE_M) + (BLOCK_SIZE_K * BLOCK_SIZE_N))]; 
+# 42
+int8_t *smem_a[2]; 
+# 43
+int8_t *smem_b[2]; 
+# 45
+(smem_a[0]) = SLB; 
+# 46
+(smem_a[1]) = (SLB + (BLOCK_SIZE_K * BLOCK_SIZE_M)); 
+# 47
+(smem_b[0]) = (SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)); 
+# 48
+(smem_b[1]) = ((SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)) + (BLOCK_SIZE_K * BLOCK_SIZE_N)); 
+# 50
+const int BCM = (BLOCK_SIZE_M) * (__device_builtin_variable_blockIdx.y); 
+# 51
+const int BCN = (BLOCK_SIZE_N) * (__device_builtin_variable_blockIdx.x); 
+# 53
+const int LDA = (NoTransA ? K : M); 
+# 54
+const int LDB = (NoTransB ? N : K); 
+# 55
+const int LDC = (RowMajorC ? N : M); 
+# 57
+const int WCM = warp_id / WAPR_NUM_N; 
+# 58
+const int WCN = warp_id % WAPR_NUM_N; 
+# 60
+const int BLOCK_K_LOOP = K / BLOCK_SIZE_K; 
+# 62
+const int8_t *BA = (A + (BCM * LDA)); 
+# 63
+const int8_t *BB = (B + (BCN * LDB)); 
+# 64
+int *BC = ((C + (BCM * LDC)) + BCN); 
+# 65
+int *BWC = ((BC + ((WCM * WARP_SIZE_M) * LDC)) + (WCN * WARP_SIZE_N)); 
+# 67
+constexpr int WARP_M_LOOP = (WARP_SIZE_M / TC_SIZE); 
+# 68
+constexpr int WARP_N_LOOP = (WARP_SIZE_N / TC_SIZE); 
+# 69
+constexpr int WARP_K_LOOP = (BLOCK_SIZE_K / TC_SIZE); 
+# 71
+nvcuda::wmma::fragment< nvcuda::wmma::matrix_a, 16, 16, 16, signed char, nvcuda::wmma::row_major>  frag_a[WARP_M_LOOP][WARP_K_LOOP]; 
+# 72
+nvcuda::wmma::fragment< nvcuda::wmma::matrix_b, 16, 16, 16, signed char, nvcuda::wmma::col_major>  frag_b[WARP_K_LOOP][WARP_N_LOOP]; 
+# 73
+nvcuda::wmma::fragment< nvcuda::wmma::accumulator, 16, 16, 16, int>  frag_c[WARP_M_LOOP][WARP_N_LOOP]; 
+# 76
+#pragma unroll
+for (
+# 76
+int i = 0; i < WARP_M_LOOP; i++) { 
+# 78
+#pragma unroll
+for (
+# 78
+int j = 0; j < WARP_N_LOOP; j++) { 
+# 79
+nvcuda::wmma::fill_fragment((frag_c[i])[j], 0); 
+# 80
+}  
+# 81
+}  
+# 83
+constexpr int WARP_SIZE_X = 2; 
+# 84
+int lane_id_x = lane_id % WARP_SIZE_X; 
+# 85
+int lane_id_y = lane_id / WARP_SIZE_X; 
+# 87
+for (int k = 0; k < BLOCK_K_LOOP; k++) { 
+# 88
+const auto *load_gmem_addr_a = ((BA + (((warp_id * TC_SIZE) + lane_id_y) * LDA)) + (k * BLOCK_SIZE_K)) + (lane_id_x * 16); 
+# 89
+const auto *load_gmem_addr_b = ((BB + (((warp_id * TC_SIZE) + lane_id_y) * LDB)) + (k * BLOCK_SIZE_K)) + (lane_id_x * 16); 
+# 91
+int store_smem_addr_a = __cvta_generic_to_shared(((smem_a[k % 2]) + (((warp_id * TC_SIZE) + lane_id_y) * BLOCK_SIZE_K)) + (lane_id_x * 16)); 
+# 92
+int store_smem_addr_b = __cvta_generic_to_shared(((smem_b[k % 2]) + (((warp_id * TC_SIZE) + lane_id_y) * BLOCK_SIZE_K)) + (lane_id_x * 16)); 
+# 94
+__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_a), "l" (load_gmem_addr_a), "n" (16)); 
+# 95
+__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_b), "l" (load_gmem_addr_b), "n" (16)); 
+# 97
+__asm__("cp.async.commit_group;\n" : :); 
+# 98
+__asm__("cp.async.wait_group 0;\n" : :); 
+# 99
+__syncthreads(); 
+# 102
+for (int ki = 0; ki < WARP_K_LOOP; ki++) { 
+# 103
+for (int yi = 0; yi < WARP_M_LOOP; yi++) { 
+# 104
+nvcuda::wmma::load_matrix_sync((frag_a[yi])[ki], &((smem_a[k % 2])[(((WCM * WARP_SIZE_M) + (yi * TC_SIZE)) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
+# 105
+for (int xi = 0; xi < WARP_N_LOOP; xi++) { 
+# 106
+nvcuda::wmma::load_matrix_sync((frag_b[ki])[xi], &((smem_b[k % 2])[(((WCN * WARP_SIZE_N) + (xi * TC_SIZE)) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
+# 107
+nvcuda::wmma::mma_sync((frag_c[yi])[xi], (frag_a[yi])[ki], (frag_b[ki])[xi], (frag_c[yi])[xi]); 
+# 108
+}  
+# 109
+}  }  
+# 110
+}  
+# 114
+#pragma unroll
+for (
+# 114
+int yi = 0; yi < WARP_M_LOOP; yi++) { 
+# 116
+#pragma unroll
+for (
+# 116
+int xi = 0; xi < WARP_N_LOOP; xi++) { 
+# 117
+nvcuda::wmma::store_matrix_sync((BWC + ((yi * TC_SIZE) * LDC)) + (xi * TC_SIZE), (frag_c[yi])[xi], LDC, wmma::mem_row_major); 
+# 118
+}  
+# 119
+}  
+# 121
+} 
+#endif
+# 20 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/gemm_i8.cuh"
+template< int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int WARP_SIZE_M, int WARP_SIZE_N, int STAGE, bool NoTransA, bool NoTransB, bool RowMajorC>  __noinline__ void 
+# 21
+GEMMI8TCU(const int8_t *A, const int8_t *B, int *C, int M, int N, int K) 
+# 22
+{::kernel::__wrapper__device_stub_GEMMI8TCU<BLOCK_SIZE_M,BLOCK_SIZE_N,BLOCK_SIZE_K,WARP_SIZE_M,WARP_SIZE_N,STAGE,NoTransA,NoTransB,RowMajorC>(A,B,C,M,N,K);
+# 121
+return;}
+#if 0
+# 22
+{ 
+# 23
+auto grid = cg::this_grid(); 
+# 24
+auto block = cg::this_thread_block(); 
+# 25
+cooperative_groups::__v1::thread_block_tile< 32>  tile32 = cg::tiled_partition< 32U> (block); 
+# 27
+int warp_id = tile32.meta_group_rank(); 
+# 28
+int lane_id = tile32.thread_rank(); 
+# 30
+constexpr int WARP_SIZE = 32; 
+# 31
+constexpr int TC_SIZE = 16; 
+# 32
+constexpr int WAPR_NUM_N = (BLOCK_SIZE_N / WARP_SIZE_N); 
+# 33
+constexpr int WAPR_NUM_M = (BLOCK_SIZE_M / WARP_SIZE_M); 
+# 34
+constexpr int WAPR_NUM = (WAPR_NUM_M * WAPR_NUM_N); 
+# 36
+static_assert(((NoTransA) == GEMM_OP_T), "NoTransA == GEMM_OP_T");
+# 37
+static_assert(((NoTransB) == GEMM_OP_N), "NoTransB == GEMM_OP_N");
+# 38
+static_assert(((RowMajorC) == GEMM_OP_T), "RowMajorC == GEMM_OP_T");
+# 40
+__attribute__((unused)) static int8_t SLB[STAGE * ((BLOCK_SIZE_K * BLOCK_SIZE_M) + (BLOCK_SIZE_K * BLOCK_SIZE_N))]; 
+# 42
+int8_t *smem_a[2]; 
+# 43
+int8_t *smem_b[2]; 
+# 45
+(smem_a[0]) = SLB; 
+# 46
+(smem_a[1]) = (SLB + (BLOCK_SIZE_K * BLOCK_SIZE_M)); 
+# 47
+(smem_b[0]) = (SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)); 
+# 48
+(smem_b[1]) = ((SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)) + (BLOCK_SIZE_K * BLOCK_SIZE_N)); 
+# 50
+const int BCM = (BLOCK_SIZE_M) * (__device_builtin_variable_blockIdx.y); 
+# 51
+const int BCN = (BLOCK_SIZE_N) * (__device_builtin_variable_blockIdx.x); 
+# 53
+const int LDA = (NoTransA ? K : M); 
+# 54
+const int LDB = (NoTransB ? N : K); 
+# 55
+const int LDC = (RowMajorC ? N : M); 
+# 57
+const int WCM = warp_id / WAPR_NUM_N; 
+# 58
+const int WCN = warp_id % WAPR_NUM_N; 
+# 60
+const int BLOCK_K_LOOP = K / BLOCK_SIZE_K; 
+# 62
+const int8_t *BA = (A + (BCM * LDA)); 
+# 63
+const int8_t *BB = (B + (BCN * LDB)); 
+# 64
+int *BC = ((C + (BCM * LDC)) + BCN); 
+# 65
+int *BWC = ((BC + ((WCM * WARP_SIZE_M) * LDC)) + (WCN * WARP_SIZE_N)); 
+# 67
+constexpr int WARP_M_LOOP = (WARP_SIZE_M / TC_SIZE); 
+# 68
+constexpr int WARP_N_LOOP = (WARP_SIZE_N / TC_SIZE); 
+# 69
+constexpr int WARP_K_LOOP = (BLOCK_SIZE_K / TC_SIZE); 
+# 71
+nvcuda::wmma::fragment< nvcuda::wmma::matrix_a, 16, 16, 16, signed char, nvcuda::wmma::row_major>  frag_a[WARP_M_LOOP][WARP_K_LOOP]; 
+# 72
+nvcuda::wmma::fragment< nvcuda::wmma::matrix_b, 16, 16, 16, signed char, nvcuda::wmma::col_major>  frag_b[WARP_K_LOOP][WARP_N_LOOP]; 
+# 73
+nvcuda::wmma::fragment< nvcuda::wmma::accumulator, 16, 16, 16, int>  frag_c[WARP_M_LOOP][WARP_N_LOOP]; 
+# 76
+#pragma unroll
+for (
+# 76
+int i = 0; i < WARP_M_LOOP; i++) { 
+# 78
+#pragma unroll
+for (
+# 78
+int j = 0; j < WARP_N_LOOP; j++) { 
+# 79
+nvcuda::wmma::fill_fragment((frag_c[i])[j], 0); 
+# 80
+}  
+# 81
+}  
+# 83
+constexpr int WARP_SIZE_X = 2; 
+# 84
+int lane_id_x = lane_id % WARP_SIZE_X; 
+# 85
+int lane_id_y = lane_id / WARP_SIZE_X; 
+# 87
+for (int k = 0; k < BLOCK_K_LOOP; k++) { 
+# 88
+const auto *load_gmem_addr_a = ((BA + (((warp_id * TC_SIZE) + lane_id_y) * LDA)) + (k * BLOCK_SIZE_K)) + (lane_id_x * 16); 
+# 89
+const auto *load_gmem_addr_b = ((BB + (((warp_id * TC_SIZE) + lane_id_y) * LDB)) + (k * BLOCK_SIZE_K)) + (lane_id_x * 16); 
+# 91
+int store_smem_addr_a = __cvta_generic_to_shared(((smem_a[k % 2]) + (((warp_id * TC_SIZE) + lane_id_y) * BLOCK_SIZE_K)) + (lane_id_x * 16)); 
+# 92
+int store_smem_addr_b = __cvta_generic_to_shared(((smem_b[k % 2]) + (((warp_id * TC_SIZE) + lane_id_y) * BLOCK_SIZE_K)) + (lane_id_x * 16)); 
+# 94
+__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_a), "l" (load_gmem_addr_a), "n" (16)); 
+# 95
+__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_b), "l" (load_gmem_addr_b), "n" (16)); 
+# 97
+__asm__("cp.async.commit_group;\n" : :); 
+# 98
+__asm__("cp.async.wait_group 0;\n" : :); 
+# 99
+__syncthreads(); 
+# 102
+for (int ki = 0; ki < WARP_K_LOOP; ki++) { 
+# 103
+for (int yi = 0; yi < WARP_M_LOOP; yi++) { 
+# 104
+nvcuda::wmma::load_matrix_sync((frag_a[yi])[ki], &((smem_a[k % 2])[(((WCM * WARP_SIZE_M) + (yi * TC_SIZE)) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
+# 105
+for (int xi = 0; xi < WARP_N_LOOP; xi++) { 
+# 106
+nvcuda::wmma::load_matrix_sync((frag_b[ki])[xi], &((smem_b[k % 2])[(((WCN * WARP_SIZE_N) + (xi * TC_SIZE)) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
+# 107
+nvcuda::wmma::mma_sync((frag_c[yi])[xi], (frag_a[yi])[ki], (frag_b[ki])[xi], (frag_c[yi])[xi]); 
+# 108
+}  
+# 109
+}  }  
+# 110
+}  
+# 114
+#pragma unroll
+for (
+# 114
+int yi = 0; yi < WARP_M_LOOP; yi++) { 
+# 116
+#pragma unroll
+for (
+# 116
+int xi = 0; xi < WARP_N_LOOP; xi++) { 
+# 117
+nvcuda::wmma::store_matrix_sync((BWC + ((yi * TC_SIZE) * LDC)) + (xi * TC_SIZE), (frag_c[yi])[xi], LDC, wmma::mem_row_major); 
+# 118
+}  
+# 119
+}  
+# 121
+} 
+#endif
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+
+# 123 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/gemm_i8.cuh"
+template< int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int WARP_SIZE_M, int WARP_SIZE_N, int STAGE, bool NoTransA, bool NoTransB, bool RowMajorC> static void 
+# 124
 __wrapper__device_stub_GEMMI8TCU(const int8_t *&A, const int8_t *&B, int8_t *&C, int &M, int &N, int &K) { ::cudaLaunchKernel(0, 0, 0, 0, 0, 0);}
 #pragma GCC diagnostic pop
 
 #if 0
-# 21
-{ 
-# 22
-auto grid = cg::this_grid(); 
-# 23
-auto block = cg::this_thread_block(); 
-# 24
-cooperative_groups::__v1::thread_block_tile< 32>  tile32 = cg::tiled_partition< 32U> (block); 
-# 26
-int warp_id = tile32.meta_group_rank(); 
-# 27
-int lane_id = tile32.thread_rank(); 
-# 29
-constexpr int WARP_SIZE = 32; 
-# 30
-constexpr int TC_SIZE = 16; 
-# 31
-constexpr int WAPR_NUM_N = (BLOCK_SIZE_N / WARP_SIZE_N); 
-# 32
-constexpr int WAPR_NUM_M = (BLOCK_SIZE_M / WARP_SIZE_M); 
-# 33
-constexpr int WAPR_NUM = (WAPR_NUM_M * WAPR_NUM_N); 
-# 35
-static_assert(((NoTransA) == GEMM_OP_T), "NoTransA == GEMM_OP_T");
-# 36
-static_assert(((NoTransB) == GEMM_OP_N), "NoTransB == GEMM_OP_N");
-# 37
-static_assert(((RowMajorC) == GEMM_OP_T), "RowMajorC == GEMM_OP_T");
-# 39
-__attribute__((unused)) static int8_t SLB[STAGE * ((BLOCK_SIZE_K * BLOCK_SIZE_M) + (BLOCK_SIZE_K * BLOCK_SIZE_N))]; 
-# 41
-int8_t *smem_a[2]; 
-# 42
-int8_t *smem_b[2]; 
-# 44
-(smem_a[0]) = SLB; 
-# 45
-(smem_a[1]) = (SLB + (BLOCK_SIZE_K * BLOCK_SIZE_M)); 
-# 46
-(smem_b[0]) = (SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)); 
-# 47
-(smem_b[1]) = ((SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)) + (BLOCK_SIZE_K * BLOCK_SIZE_N)); 
-# 49
-const int BCM = (BLOCK_SIZE_M) * (__device_builtin_variable_blockIdx.y); 
-# 50
-const int BCN = (BLOCK_SIZE_N) * (__device_builtin_variable_blockIdx.x); 
-# 52
-const int LDA = (NoTransA ? K : M); 
-# 53
-const int LDB = (NoTransB ? N : K); 
-# 54
-const int LDC = (RowMajorC ? N : M); 
-# 56
-const int WCM = warp_id / WAPR_NUM_N; 
-# 57
-const int WCN = warp_id % WAPR_NUM_N; 
-# 59
-const int BLOCK_K_LOOP = K / BLOCK_SIZE_K; 
-# 61
-const int8_t *BA = (A + (BCM * LDA)); 
-# 62
-const int8_t *BB = (B + (BCN * LDB)); 
-# 63
-int8_t *BC = ((C + (BCM * LDC)) + BCN); 
-# 64
-int8_t *BWC = ((BC + ((WCM * WARP_SIZE_M) * LDC)) + (WCN * WARP_SIZE_N)); 
-# 66
-constexpr int WARP_M_LOOP = (WARP_SIZE_M / TC_SIZE); 
-# 67
-constexpr int WARP_N_LOOP = (WARP_SIZE_N / TC_SIZE); 
-# 68
-constexpr int WARP_K_LOOP = (BLOCK_SIZE_K / TC_SIZE); 
-# 70
-nvcuda::wmma::fragment< nvcuda::wmma::matrix_a, 16, 16, 16, signed char, nvcuda::wmma::row_major>  frag_a[4][4]; 
-# 71
-nvcuda::wmma::fragment< nvcuda::wmma::matrix_b, 16, 16, 16, signed char, nvcuda::wmma::col_major>  frag_b[4][4]; 
-# 72
-nvcuda::wmma::fragment< nvcuda::wmma::accumulator, 16, 16, 16, int>  frag_c[4][4]; 
-# 75
-#pragma unroll
-for (
-# 75
-int i = 0; i < 4; i++) { 
-# 77
-#pragma unroll
-for (
-# 77
-int j = 0; j < 4; j++) { 
-# 78
-wmma::fill_fragment((frag_c[i])[j], 0); 
-# 79
-}  
-# 80
-}  
-# 82
-constexpr int WARP_SIZE_X = 4; 
-# 83
-int lane_id_x = lane_id % WARP_SIZE_X; 
-# 84
-int lane_id_y = lane_id / WARP_SIZE_X; 
-# 85
-int smem_lane_id_x = lane_id / TC_SIZE; 
-# 86
-int smem_lane_id_y = lane_id % TC_SIZE; 
-# 87
-int gmem_lane_id_x = lane_id % (TC_SIZE / 8); 
-# 88
-int gmem_lane_id_y = lane_id / (TC_SIZE / 8); 
-# 90
-for (int k = 0; k < BLOCK_K_LOOP; k++) { 
-# 91
-const auto *load_gmem_addr_a = ((BA + (((warp_id * TC_SIZE) + gmem_lane_id_y) * LDA)) + (k * BLOCK_SIZE_K)) + (gmem_lane_id_x * 16); 
-# 92
-const auto *load_gmem_addr_b = ((BB + (((warp_id * TC_SIZE) + gmem_lane_id_y) * LDB)) + (k * BLOCK_SIZE_K)) + (gmem_lane_id_x * 16); 
-# 94
-int store_smem_addr_a = __cvta_generic_to_shared(((smem_a[k % 2]) + (((warp_id * TC_SIZE) + smem_lane_id_y) * BLOCK_SIZE_K)) + (smem_lane_id_x * 16)); 
-# 95
-int store_smem_addr_b = __cvta_generic_to_shared(((smem_b[k % 2]) + (((warp_id * TC_SIZE) + smem_lane_id_y) * BLOCK_SIZE_K)) + (smem_lane_id_x * 16)); 
-# 97
-__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_a), "l" (load_gmem_addr_a), "n" (16)); 
-# 98
-__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_b), "l" (load_gmem_addr_b), "n" (16)); 
-# 100
-__asm__("cp.async.commit_group;\n" : :); 
-# 101
-__asm__("cp.async.wait_group 0;\n" : :); 
-# 102
-__syncthreads(); 
-# 105
-for (int ki = 0; ki < WARP_K_LOOP; ki++) { 
-# 106
-for (int yi = 0; yi < WARP_M_LOOP; yi++) { 
-# 107
-nvcuda::wmma::load_matrix_sync((frag_a[yi])[ki], &((smem_a[k % 2])[((WCM * WARP_SIZE_M) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
-# 108
-for (int xi = 0; xi < WARP_N_LOOP; xi++) { 
-# 109
-nvcuda::wmma::load_matrix_sync((frag_b[ki])[xi], &((smem_b[k % 2])[((WCN * WARP_SIZE_N) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
-# 110
-wmma::mma_sync((frag_c[yi])[xi], (frag_a[yi])[ki], (frag_b[ki])[xi], (frag_c[yi])[xi]); 
-# 111
-}  
-# 112
-}  }  
-# 113
-}  
-# 117
-#pragma unroll
-for (
-# 117
-int yi = 0; yi < WARP_M_LOOP; yi++) { 
-# 119
-#pragma unroll
-for (
-# 119
-int xi = 0; xi < WARP_N_LOOP; xi++) 
-# 120
-{ 
-# 121
-auto *store_gmem_addr = reinterpret_cast< uint2 *>(((BWC + (((yi * TC_SIZE) + gmem_lane_id_y) * LDC)) + (xi * TC_SIZE)) + (gmem_lane_id_x * 8)); 
-# 122
-uint2 tmp_vr; 
-# 123
-(tmp_vr.x) = (((((((frag_c[yi])[xi]).x)[0]) + (((((frag_c[yi])[xi]).x)[1]) << 8)) + (((((frag_c[yi])[xi]).x)[2]) << 16)) + (((((frag_c[yi])[xi]).x)[3]) << 24)); 
-# 124
-(tmp_vr.y) = (((((((frag_c[yi])[xi]).x)[4]) + (((((frag_c[yi])[xi]).x)[5]) << 8)) + (((((frag_c[yi])[xi]).x)[6]) << 16)) + (((((frag_c[yi])[xi]).x)[7]) << 24)); 
 # 125
-(*store_gmem_addr) = tmp_vr; 
+{ 
 # 126
-}  }  
+auto grid = cg::this_grid(); 
 # 127
+auto block = cg::this_thread_block(); 
+# 128
+cooperative_groups::__v1::thread_block_tile< 32>  tile32 = cg::tiled_partition< 32U> (block); 
+# 130
+int warp_id = tile32.meta_group_rank(); 
+# 131
+int lane_id = tile32.thread_rank(); 
+# 133
+constexpr int WARP_SIZE = 32; 
+# 134
+constexpr int TC_SIZE = 16; 
+# 135
+constexpr int WAPR_NUM_N = (BLOCK_SIZE_N / WARP_SIZE_N); 
+# 136
+constexpr int WAPR_NUM_M = (BLOCK_SIZE_M / WARP_SIZE_M); 
+# 137
+constexpr int WAPR_NUM = (WAPR_NUM_M * WAPR_NUM_N); 
+# 139
+static_assert(((NoTransA) == GEMM_OP_T), "NoTransA == GEMM_OP_T");
+# 140
+static_assert(((NoTransB) == GEMM_OP_N), "NoTransB == GEMM_OP_N");
+# 141
+static_assert(((RowMajorC) == GEMM_OP_T), "RowMajorC == GEMM_OP_T");
+# 143
+__attribute__((unused)) static int8_t SLB[STAGE * ((BLOCK_SIZE_K * BLOCK_SIZE_M) + (BLOCK_SIZE_K * BLOCK_SIZE_N))]; 
+# 145
+int8_t *smem_a[2]; 
+# 146
+int8_t *smem_b[2]; 
+# 148
+(smem_a[0]) = SLB; 
+# 149
+(smem_a[1]) = (SLB + (BLOCK_SIZE_K * BLOCK_SIZE_M)); 
+# 150
+(smem_b[0]) = (SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)); 
+# 151
+(smem_b[1]) = ((SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)) + (BLOCK_SIZE_K * BLOCK_SIZE_N)); 
+# 153
+const int BCM = (BLOCK_SIZE_M) * (__device_builtin_variable_blockIdx.y); 
+# 154
+const int BCN = (BLOCK_SIZE_N) * (__device_builtin_variable_blockIdx.x); 
+# 156
+const int LDA = (NoTransA ? K : M); 
+# 157
+const int LDB = (NoTransB ? N : K); 
+# 158
+const int LDC = (RowMajorC ? N : M); 
+# 160
+const int WCM = warp_id / WAPR_NUM_N; 
+# 161
+const int WCN = warp_id % WAPR_NUM_N; 
+# 163
+const int BLOCK_K_LOOP = K / BLOCK_SIZE_K; 
+# 165
+const int8_t *BA = (A + (BCM * LDA)); 
+# 166
+const int8_t *BB = (B + (BCN * LDB)); 
+# 167
+int8_t *BC = ((C + (BCM * LDC)) + BCN); 
+# 168
+int8_t *BWC = ((BC + ((WCM * WARP_SIZE_M) * LDC)) + (WCN * WARP_SIZE_N)); 
+# 170
+constexpr int WARP_M_LOOP = (WARP_SIZE_M / TC_SIZE); 
+# 171
+constexpr int WARP_N_LOOP = (WARP_SIZE_N / TC_SIZE); 
+# 172
+constexpr int WARP_K_LOOP = (BLOCK_SIZE_K / TC_SIZE); 
+# 174
+nvcuda::wmma::fragment< nvcuda::wmma::matrix_a, 16, 16, 16, signed char, nvcuda::wmma::row_major>  frag_a[WARP_M_LOOP][WARP_K_LOOP]; 
+# 175
+nvcuda::wmma::fragment< nvcuda::wmma::matrix_b, 16, 16, 16, signed char, nvcuda::wmma::col_major>  frag_b[WARP_K_LOOP][WARP_N_LOOP]; 
+# 176
+nvcuda::wmma::fragment< nvcuda::wmma::accumulator, 16, 16, 16, int>  frag_c[WARP_M_LOOP][WARP_N_LOOP]; 
+# 179
+#pragma unroll
+for (
+# 179
+int i = 0; i < WARP_M_LOOP; i++) { 
+# 181
+#pragma unroll
+for (
+# 181
+int j = 0; j < WARP_N_LOOP; j++) { 
+# 182
+nvcuda::wmma::fill_fragment((frag_c[i])[j], 0); 
+# 183
+}  
+# 184
+}  
+# 186
+constexpr int WARP_SIZE_X = 2; 
+# 187
+int lane_id_x = lane_id % WARP_SIZE_X; 
+# 188
+int lane_id_y = lane_id / WARP_SIZE_X; 
+# 190
+for (int k = 0; k < BLOCK_K_LOOP; k++) { 
+# 191
+const auto *load_gmem_addr_a = ((BA + (((warp_id * TC_SIZE) + lane_id_y) * LDA)) + (k * BLOCK_SIZE_K)) + (lane_id_x * 16); 
+# 192
+const auto *load_gmem_addr_b = ((BB + (((warp_id * TC_SIZE) + lane_id_y) * LDB)) + (k * BLOCK_SIZE_K)) + (lane_id_x * 16); 
+# 194
+int store_smem_addr_a = __cvta_generic_to_shared(((smem_a[k % 2]) + (((warp_id * TC_SIZE) + lane_id_y) * BLOCK_SIZE_K)) + (lane_id_x * 16)); 
+# 195
+int store_smem_addr_b = __cvta_generic_to_shared(((smem_b[k % 2]) + (((warp_id * TC_SIZE) + lane_id_y) * BLOCK_SIZE_K)) + (lane_id_x * 16)); 
+# 197
+__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_a), "l" (load_gmem_addr_a), "n" (16)); 
+# 198
+__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_b), "l" (load_gmem_addr_b), "n" (16)); 
+# 200
+__asm__("cp.async.commit_group;\n" : :); 
+# 201
+__asm__("cp.async.wait_group 0;\n" : :); 
+# 202
+__syncthreads(); 
+# 205
+for (int ki = 0; ki < WARP_K_LOOP; ki++) { 
+# 206
+for (int yi = 0; yi < WARP_M_LOOP; yi++) { 
+# 207
+nvcuda::wmma::load_matrix_sync((frag_a[yi])[ki], &((smem_a[k % 2])[(((WCM * WARP_SIZE_M) + (yi * TC_SIZE)) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
+# 208
+for (int xi = 0; xi < WARP_N_LOOP; xi++) { 
+# 209
+nvcuda::wmma::load_matrix_sync((frag_b[ki])[xi], &((smem_b[k % 2])[(((WCN * WARP_SIZE_N) + (xi * TC_SIZE)) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
+# 210
+nvcuda::wmma::mma_sync((frag_c[yi])[xi], (frag_a[yi])[ki], (frag_b[ki])[xi], (frag_c[yi])[xi]); 
+# 211
+}  
+# 212
+}  }  
+# 213
+}  
+# 215
+int gmem_lane_id_x = lane_id % 4; 
+# 216
+int gmem_lane_id_y = lane_id / 4; 
+# 218
+#pragma unroll
+for (
+# 218
+int yi = 0; yi < WARP_M_LOOP; yi++) { 
+# 220
+#pragma unroll
+for (
+# 220
+int xi = 0; xi < WARP_N_LOOP; xi++) 
+# 221
+{ 
+# 222
+int8_t tmp_char[8]; 
+# 224
+#pragma unroll
+for (
+# 224
+int i = 0; i < 8; i++) { 
+# 225
+(tmp_char[i]) = (static_cast< int8_t>((((frag_c[yi])[xi]).x)[i])); 
+# 226
+}  
+# 228
+for (int tc_yi = 0; tc_yi < 2; tc_yi++) { 
+# 229
+for (int tc_xi = 0; tc_xi < 2; tc_xi++) { 
+# 230
+auto *store_gmem_addr = reinterpret_cast< char2 *>((((BWC + ((((yi * TC_SIZE) + ((tc_yi * TC_SIZE) / 2)) + gmem_lane_id_y) * LDC)) + (xi * TC_SIZE)) + ((tc_xi * TC_SIZE) / 2)) + (gmem_lane_id_x * 2)); 
+# 231
+char2 tmp_char2; 
+# 232
+(tmp_char2.x) = (tmp_char[((tc_xi * 4) + (tc_yi * 2)) + 0]); 
+# 233
+(tmp_char2.y) = (tmp_char[((tc_xi * 4) + (tc_yi * 2)) + 1]); 
+# 234
+(*store_gmem_addr) = tmp_char2; 
+# 235
+}  
+# 236
+}  
+# 237
+}  }  
+# 238
 } 
 #endif
-# 19 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/gemm_i8.cuh"
+# 123 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/gemm_i8.cuh"
 template< int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int WARP_SIZE_M, int WARP_SIZE_N, int STAGE, bool NoTransA, bool NoTransB, bool RowMajorC>  __noinline__ void 
-# 20
+# 124
 GEMMI8TCU(const int8_t *A, const int8_t *B, int8_t *C, int M, int N, int K) 
-# 21
+# 125
 {::kernel::__wrapper__device_stub_GEMMI8TCU<BLOCK_SIZE_M,BLOCK_SIZE_N,BLOCK_SIZE_K,WARP_SIZE_M,WARP_SIZE_N,STAGE,NoTransA,NoTransB,RowMajorC>(A,B,C,M,N,K);
-# 127
+# 238
 return;}
 #if 0
-# 21
-{ 
-# 22
-auto grid = cg::this_grid(); 
-# 23
-auto block = cg::this_thread_block(); 
-# 24
-cooperative_groups::__v1::thread_block_tile< 32>  tile32 = cg::tiled_partition< 32U> (block); 
-# 26
-int warp_id = tile32.meta_group_rank(); 
-# 27
-int lane_id = tile32.thread_rank(); 
-# 29
-constexpr int WARP_SIZE = 32; 
-# 30
-constexpr int TC_SIZE = 16; 
-# 31
-constexpr int WAPR_NUM_N = (BLOCK_SIZE_N / WARP_SIZE_N); 
-# 32
-constexpr int WAPR_NUM_M = (BLOCK_SIZE_M / WARP_SIZE_M); 
-# 33
-constexpr int WAPR_NUM = (WAPR_NUM_M * WAPR_NUM_N); 
-# 35
-static_assert(((NoTransA) == GEMM_OP_T), "NoTransA == GEMM_OP_T");
-# 36
-static_assert(((NoTransB) == GEMM_OP_N), "NoTransB == GEMM_OP_N");
-# 37
-static_assert(((RowMajorC) == GEMM_OP_T), "RowMajorC == GEMM_OP_T");
-# 39
-__attribute__((unused)) static int8_t SLB[STAGE * ((BLOCK_SIZE_K * BLOCK_SIZE_M) + (BLOCK_SIZE_K * BLOCK_SIZE_N))]; 
-# 41
-int8_t *smem_a[2]; 
-# 42
-int8_t *smem_b[2]; 
-# 44
-(smem_a[0]) = SLB; 
-# 45
-(smem_a[1]) = (SLB + (BLOCK_SIZE_K * BLOCK_SIZE_M)); 
-# 46
-(smem_b[0]) = (SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)); 
-# 47
-(smem_b[1]) = ((SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)) + (BLOCK_SIZE_K * BLOCK_SIZE_N)); 
-# 49
-const int BCM = (BLOCK_SIZE_M) * (__device_builtin_variable_blockIdx.y); 
-# 50
-const int BCN = (BLOCK_SIZE_N) * (__device_builtin_variable_blockIdx.x); 
-# 52
-const int LDA = (NoTransA ? K : M); 
-# 53
-const int LDB = (NoTransB ? N : K); 
-# 54
-const int LDC = (RowMajorC ? N : M); 
-# 56
-const int WCM = warp_id / WAPR_NUM_N; 
-# 57
-const int WCN = warp_id % WAPR_NUM_N; 
-# 59
-const int BLOCK_K_LOOP = K / BLOCK_SIZE_K; 
-# 61
-const int8_t *BA = (A + (BCM * LDA)); 
-# 62
-const int8_t *BB = (B + (BCN * LDB)); 
-# 63
-int8_t *BC = ((C + (BCM * LDC)) + BCN); 
-# 64
-int8_t *BWC = ((BC + ((WCM * WARP_SIZE_M) * LDC)) + (WCN * WARP_SIZE_N)); 
-# 66
-constexpr int WARP_M_LOOP = (WARP_SIZE_M / TC_SIZE); 
-# 67
-constexpr int WARP_N_LOOP = (WARP_SIZE_N / TC_SIZE); 
-# 68
-constexpr int WARP_K_LOOP = (BLOCK_SIZE_K / TC_SIZE); 
-# 70
-nvcuda::wmma::fragment< nvcuda::wmma::matrix_a, 16, 16, 16, signed char, nvcuda::wmma::row_major>  frag_a[4][4]; 
-# 71
-nvcuda::wmma::fragment< nvcuda::wmma::matrix_b, 16, 16, 16, signed char, nvcuda::wmma::col_major>  frag_b[4][4]; 
-# 72
-nvcuda::wmma::fragment< nvcuda::wmma::accumulator, 16, 16, 16, int>  frag_c[4][4]; 
-# 75
-#pragma unroll
-for (
-# 75
-int i = 0; i < 4; i++) { 
-# 77
-#pragma unroll
-for (
-# 77
-int j = 0; j < 4; j++) { 
-# 78
-wmma::fill_fragment((frag_c[i])[j], 0); 
-# 79
-}  
-# 80
-}  
-# 82
-constexpr int WARP_SIZE_X = 4; 
-# 83
-int lane_id_x = lane_id % WARP_SIZE_X; 
-# 84
-int lane_id_y = lane_id / WARP_SIZE_X; 
-# 85
-int smem_lane_id_x = lane_id / TC_SIZE; 
-# 86
-int smem_lane_id_y = lane_id % TC_SIZE; 
-# 87
-int gmem_lane_id_x = lane_id % (TC_SIZE / 8); 
-# 88
-int gmem_lane_id_y = lane_id / (TC_SIZE / 8); 
-# 90
-for (int k = 0; k < BLOCK_K_LOOP; k++) { 
-# 91
-const auto *load_gmem_addr_a = ((BA + (((warp_id * TC_SIZE) + gmem_lane_id_y) * LDA)) + (k * BLOCK_SIZE_K)) + (gmem_lane_id_x * 16); 
-# 92
-const auto *load_gmem_addr_b = ((BB + (((warp_id * TC_SIZE) + gmem_lane_id_y) * LDB)) + (k * BLOCK_SIZE_K)) + (gmem_lane_id_x * 16); 
-# 94
-int store_smem_addr_a = __cvta_generic_to_shared(((smem_a[k % 2]) + (((warp_id * TC_SIZE) + smem_lane_id_y) * BLOCK_SIZE_K)) + (smem_lane_id_x * 16)); 
-# 95
-int store_smem_addr_b = __cvta_generic_to_shared(((smem_b[k % 2]) + (((warp_id * TC_SIZE) + smem_lane_id_y) * BLOCK_SIZE_K)) + (smem_lane_id_x * 16)); 
-# 97
-__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_a), "l" (load_gmem_addr_a), "n" (16)); 
-# 98
-__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_b), "l" (load_gmem_addr_b), "n" (16)); 
-# 100
-__asm__("cp.async.commit_group;\n" : :); 
-# 101
-__asm__("cp.async.wait_group 0;\n" : :); 
-# 102
-__syncthreads(); 
-# 105
-for (int ki = 0; ki < WARP_K_LOOP; ki++) { 
-# 106
-for (int yi = 0; yi < WARP_M_LOOP; yi++) { 
-# 107
-nvcuda::wmma::load_matrix_sync((frag_a[yi])[ki], &((smem_a[k % 2])[((WCM * WARP_SIZE_M) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
-# 108
-for (int xi = 0; xi < WARP_N_LOOP; xi++) { 
-# 109
-nvcuda::wmma::load_matrix_sync((frag_b[ki])[xi], &((smem_b[k % 2])[((WCN * WARP_SIZE_N) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
-# 110
-wmma::mma_sync((frag_c[yi])[xi], (frag_a[yi])[ki], (frag_b[ki])[xi], (frag_c[yi])[xi]); 
-# 111
-}  
-# 112
-}  }  
-# 113
-}  
-# 117
-#pragma unroll
-for (
-# 117
-int yi = 0; yi < WARP_M_LOOP; yi++) { 
-# 119
-#pragma unroll
-for (
-# 119
-int xi = 0; xi < WARP_N_LOOP; xi++) 
-# 120
-{ 
-# 121
-auto *store_gmem_addr = reinterpret_cast< uint2 *>(((BWC + (((yi * TC_SIZE) + gmem_lane_id_y) * LDC)) + (xi * TC_SIZE)) + (gmem_lane_id_x * 8)); 
-# 122
-uint2 tmp_vr; 
-# 123
-(tmp_vr.x) = (((((((frag_c[yi])[xi]).x)[0]) + (((((frag_c[yi])[xi]).x)[1]) << 8)) + (((((frag_c[yi])[xi]).x)[2]) << 16)) + (((((frag_c[yi])[xi]).x)[3]) << 24)); 
-# 124
-(tmp_vr.y) = (((((((frag_c[yi])[xi]).x)[4]) + (((((frag_c[yi])[xi]).x)[5]) << 8)) + (((((frag_c[yi])[xi]).x)[6]) << 16)) + (((((frag_c[yi])[xi]).x)[7]) << 24)); 
 # 125
-(*store_gmem_addr) = tmp_vr; 
+{ 
 # 126
-}  }  
+auto grid = cg::this_grid(); 
 # 127
+auto block = cg::this_thread_block(); 
+# 128
+cooperative_groups::__v1::thread_block_tile< 32>  tile32 = cg::tiled_partition< 32U> (block); 
+# 130
+int warp_id = tile32.meta_group_rank(); 
+# 131
+int lane_id = tile32.thread_rank(); 
+# 133
+constexpr int WARP_SIZE = 32; 
+# 134
+constexpr int TC_SIZE = 16; 
+# 135
+constexpr int WAPR_NUM_N = (BLOCK_SIZE_N / WARP_SIZE_N); 
+# 136
+constexpr int WAPR_NUM_M = (BLOCK_SIZE_M / WARP_SIZE_M); 
+# 137
+constexpr int WAPR_NUM = (WAPR_NUM_M * WAPR_NUM_N); 
+# 139
+static_assert(((NoTransA) == GEMM_OP_T), "NoTransA == GEMM_OP_T");
+# 140
+static_assert(((NoTransB) == GEMM_OP_N), "NoTransB == GEMM_OP_N");
+# 141
+static_assert(((RowMajorC) == GEMM_OP_T), "RowMajorC == GEMM_OP_T");
+# 143
+__attribute__((unused)) static int8_t SLB[STAGE * ((BLOCK_SIZE_K * BLOCK_SIZE_M) + (BLOCK_SIZE_K * BLOCK_SIZE_N))]; 
+# 145
+int8_t *smem_a[2]; 
+# 146
+int8_t *smem_b[2]; 
+# 148
+(smem_a[0]) = SLB; 
+# 149
+(smem_a[1]) = (SLB + (BLOCK_SIZE_K * BLOCK_SIZE_M)); 
+# 150
+(smem_b[0]) = (SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)); 
+# 151
+(smem_b[1]) = ((SLB + ((STAGE * BLOCK_SIZE_K) * BLOCK_SIZE_M)) + (BLOCK_SIZE_K * BLOCK_SIZE_N)); 
+# 153
+const int BCM = (BLOCK_SIZE_M) * (__device_builtin_variable_blockIdx.y); 
+# 154
+const int BCN = (BLOCK_SIZE_N) * (__device_builtin_variable_blockIdx.x); 
+# 156
+const int LDA = (NoTransA ? K : M); 
+# 157
+const int LDB = (NoTransB ? N : K); 
+# 158
+const int LDC = (RowMajorC ? N : M); 
+# 160
+const int WCM = warp_id / WAPR_NUM_N; 
+# 161
+const int WCN = warp_id % WAPR_NUM_N; 
+# 163
+const int BLOCK_K_LOOP = K / BLOCK_SIZE_K; 
+# 165
+const int8_t *BA = (A + (BCM * LDA)); 
+# 166
+const int8_t *BB = (B + (BCN * LDB)); 
+# 167
+int8_t *BC = ((C + (BCM * LDC)) + BCN); 
+# 168
+int8_t *BWC = ((BC + ((WCM * WARP_SIZE_M) * LDC)) + (WCN * WARP_SIZE_N)); 
+# 170
+constexpr int WARP_M_LOOP = (WARP_SIZE_M / TC_SIZE); 
+# 171
+constexpr int WARP_N_LOOP = (WARP_SIZE_N / TC_SIZE); 
+# 172
+constexpr int WARP_K_LOOP = (BLOCK_SIZE_K / TC_SIZE); 
+# 174
+nvcuda::wmma::fragment< nvcuda::wmma::matrix_a, 16, 16, 16, signed char, nvcuda::wmma::row_major>  frag_a[WARP_M_LOOP][WARP_K_LOOP]; 
+# 175
+nvcuda::wmma::fragment< nvcuda::wmma::matrix_b, 16, 16, 16, signed char, nvcuda::wmma::col_major>  frag_b[WARP_K_LOOP][WARP_N_LOOP]; 
+# 176
+nvcuda::wmma::fragment< nvcuda::wmma::accumulator, 16, 16, 16, int>  frag_c[WARP_M_LOOP][WARP_N_LOOP]; 
+# 179
+#pragma unroll
+for (
+# 179
+int i = 0; i < WARP_M_LOOP; i++) { 
+# 181
+#pragma unroll
+for (
+# 181
+int j = 0; j < WARP_N_LOOP; j++) { 
+# 182
+nvcuda::wmma::fill_fragment((frag_c[i])[j], 0); 
+# 183
+}  
+# 184
+}  
+# 186
+constexpr int WARP_SIZE_X = 2; 
+# 187
+int lane_id_x = lane_id % WARP_SIZE_X; 
+# 188
+int lane_id_y = lane_id / WARP_SIZE_X; 
+# 190
+for (int k = 0; k < BLOCK_K_LOOP; k++) { 
+# 191
+const auto *load_gmem_addr_a = ((BA + (((warp_id * TC_SIZE) + lane_id_y) * LDA)) + (k * BLOCK_SIZE_K)) + (lane_id_x * 16); 
+# 192
+const auto *load_gmem_addr_b = ((BB + (((warp_id * TC_SIZE) + lane_id_y) * LDB)) + (k * BLOCK_SIZE_K)) + (lane_id_x * 16); 
+# 194
+int store_smem_addr_a = __cvta_generic_to_shared(((smem_a[k % 2]) + (((warp_id * TC_SIZE) + lane_id_y) * BLOCK_SIZE_K)) + (lane_id_x * 16)); 
+# 195
+int store_smem_addr_b = __cvta_generic_to_shared(((smem_b[k % 2]) + (((warp_id * TC_SIZE) + lane_id_y) * BLOCK_SIZE_K)) + (lane_id_x * 16)); 
+# 197
+__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_a), "l" (load_gmem_addr_a), "n" (16)); 
+# 198
+__asm__ volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n" : : "r" (store_smem_addr_b), "l" (load_gmem_addr_b), "n" (16)); 
+# 200
+__asm__("cp.async.commit_group;\n" : :); 
+# 201
+__asm__("cp.async.wait_group 0;\n" : :); 
+# 202
+__syncthreads(); 
+# 205
+for (int ki = 0; ki < WARP_K_LOOP; ki++) { 
+# 206
+for (int yi = 0; yi < WARP_M_LOOP; yi++) { 
+# 207
+nvcuda::wmma::load_matrix_sync((frag_a[yi])[ki], &((smem_a[k % 2])[(((WCM * WARP_SIZE_M) + (yi * TC_SIZE)) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
+# 208
+for (int xi = 0; xi < WARP_N_LOOP; xi++) { 
+# 209
+nvcuda::wmma::load_matrix_sync((frag_b[ki])[xi], &((smem_b[k % 2])[(((WCN * WARP_SIZE_N) + (xi * TC_SIZE)) * BLOCK_SIZE_K) + (ki * TC_SIZE)]), BLOCK_SIZE_K); 
+# 210
+nvcuda::wmma::mma_sync((frag_c[yi])[xi], (frag_a[yi])[ki], (frag_b[ki])[xi], (frag_c[yi])[xi]); 
+# 211
+}  
+# 212
+}  }  
+# 213
+}  
+# 215
+int gmem_lane_id_x = lane_id % 4; 
+# 216
+int gmem_lane_id_y = lane_id / 4; 
+# 218
+#pragma unroll
+for (
+# 218
+int yi = 0; yi < WARP_M_LOOP; yi++) { 
+# 220
+#pragma unroll
+for (
+# 220
+int xi = 0; xi < WARP_N_LOOP; xi++) 
+# 221
+{ 
+# 222
+int8_t tmp_char[8]; 
+# 224
+#pragma unroll
+for (
+# 224
+int i = 0; i < 8; i++) { 
+# 225
+(tmp_char[i]) = (static_cast< int8_t>((((frag_c[yi])[xi]).x)[i])); 
+# 226
+}  
+# 228
+for (int tc_yi = 0; tc_yi < 2; tc_yi++) { 
+# 229
+for (int tc_xi = 0; tc_xi < 2; tc_xi++) { 
+# 230
+auto *store_gmem_addr = reinterpret_cast< char2 *>((((BWC + ((((yi * TC_SIZE) + ((tc_yi * TC_SIZE) / 2)) + gmem_lane_id_y) * LDC)) + (xi * TC_SIZE)) + ((tc_xi * TC_SIZE) / 2)) + (gmem_lane_id_x * 2)); 
+# 231
+char2 tmp_char2; 
+# 232
+(tmp_char2.x) = (tmp_char[((tc_xi * 4) + (tc_yi * 2)) + 0]); 
+# 233
+(tmp_char2.y) = (tmp_char[((tc_xi * 4) + (tc_yi * 2)) + 1]); 
+# 234
+(*store_gmem_addr) = tmp_char2; 
+# 235
+}  
+# 236
+}  
+# 237
+}  }  
+# 238
 } 
 #endif
-# 130 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/gemm_i8.cuh"
+# 241 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/gemm_i8.cuh"
 }
 # 18 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
 using namespace std;
 # 21
-template< bool use_tcu> void 
+template< bool use_tcu, class T> void 
 # 22
 GEMMI8(cudaStream_t stream, const int8_t *
 # 23
-A, const int8_t *B, int8_t *C, int 
+A, const int8_t *B, T *C, int 
 # 24
 M, int N, int K, bool 
 # 25
@@ -117559,236 +117939,268 @@ dim3 grid((((N + BLOCK_N) - 1) / BLOCK_N) / 1, ((M + BLOCK_M) - 1) / BLOCK_M);
 # 37
 if ((transA == GEMM_OP_T) && (transB == GEMM_OP_N) && (transC == GEMM_OP_T)) { 
 # 38
-(__cudaPushCallConfiguration(grid, block, 0, stream)) ? (void)0 : kernel::GEMMI8TCU< 256, 256, 32, 64, 64, 2, GEMM_OP_T, GEMM_OP_N, GEMM_OP_T> (A, B, C, M, N, K); }  
+(__cudaPushCallConfiguration(grid, block, 0, stream)) ? (void)0 : kernel::GEMMI8TCU< BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, 2, GEMM_OP_T, GEMM_OP_N, GEMM_OP_T> (A, B, C, M, N, K); }  
 # 40
 } 
 # 43
+template< class T> 
+# 44
 class GEMM { 
-# 45
-public: GEMM(bool use_tcu, int m, int n, int k, bool transa, bool transb, bool transc) { 
 # 46
-(this->use_tcu) = use_tcu; 
+public: GEMM(bool use_tcu, int m, int n, int k, bool transa, bool transb, bool transc) { 
 # 47
-(this->M) = m; 
-# 48
-(this->N) = n; 
+(this->use_tcu) = use_tcu; 
 # 49
-(this->K) = k; 
+(this->M) = m; 
+# 50
+(this->N) = n; 
 # 51
-(this->len_a) = ((M) * (K)); 
-# 52
-(this->len_b) = ((N) * (K)); 
+(this->K) = k; 
 # 53
-(this->len_c) = ((M) * (N)); 
+(this->len_a) = ((M) * (K)); 
+# 54
+(this->len_b) = ((N) * (K)); 
 # 55
-(this->trans_a) = transa; 
-# 56
-(this->trans_b) = transb; 
+(this->len_c) = ((M) * (N)); 
 # 57
-(this->trans_c) = transc; 
+(this->trans_a) = transa; 
+# 58
+(this->trans_b) = transb; 
 # 59
-(((((((((((((((((((((((((((((((cout << ("compute type=int32"))) << (", "))) << ("data type=int8"))) << (", "))) << ("use_tcu="))) << use_tcu)) << (", "))) << ("M="))) << m)) << (", "))) << ("N="))) << n)) << (", "))) << ("K="))) << k)) << (endl)); 
-# 67
-this->generateTestData(); 
-# 68
-} 
+(this->trans_c) = transc; 
+# 61
+(((((((((((((((((((((((((((((((((((((cout << ("compute type=int32"))) << (", "))) << ("input data type=int8"))) << (", "))) << ("output data type="))) << ((std::template is_same< T, int8_t> ::value) ? "int8" : ("int32")))) << (", "))) << ("use_tcu="))) << use_tcu)) << (", "))) << ("M="))) << m)) << (", "))) << ("N="))) << n)) << (", "))) << ("K="))) << k)) << (endl)); 
 # 70
+generateTestData(); 
+# 71
+} 
+# 73
 ~GEMM() = default;
-# 72
-void generateTestData() { 
-# 74
-const auto random_seed = 2023; 
 # 75
-std::mt19937 generator(static_cast< unsigned>(random_seed)); 
+void generateTestData() { 
 # 77
-((h_mat_A) = std::vector< signed char> (len_a, 0)); 
+const auto random_seed = 2023; 
 # 78
-((h_mat_B) = std::vector< signed char> (len_b, 0)); 
-# 79
-((h_mat_C) = std::vector< signed char> (len_c, 0)); 
+std::mt19937 generator(static_cast< unsigned>(random_seed)); 
 # 80
-((h_mat_C_ref) = std::vector< signed char> (len_c, 0)); 
+((h_mat_A) = std::vector< int8_t> (len_a, 0)); 
+# 81
+((h_mat_B) = std::vector< int8_t> (len_b, 0)); 
 # 82
-std::uniform_int_distribution<>  uniform_char_distribution((-127) - 1, 127); 
-# 84 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-auto rand_gen = std::bind(uniform_char_distribution, generator); 
+(h_mat_C) = std::vector< T> (len_c, 0); 
+# 83
+(h_mat_C_ref) = std::vector< T> (len_c, 0); 
 # 85
-auto const_gen = []() { return 1; } ; typedef decltype(const_gen) __T0;
-# 87
-generate_n((h_mat_A).begin(), len_a, const_gen); 
+std::uniform_int_distribution<>  uniform_char_distribution((-127) - 1, 127); 
+# 87 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+auto rand_gen = std::bind(uniform_char_distribution, generator); 
 # 88
-generate_n((h_mat_B).begin(), len_b, const_gen); 
-# 90
-} 
-# 93
-void testGEMM() { 
+auto const_gen = []() { return 1; } ; 
+# 89
+auto pattern_gen = []() { static int i = 0; return ((i++) / 32) % 64; } ; 
+# 91
+generate_n((h_mat_A).begin(), len_a, rand_gen); 
+# 92
+generate_n((h_mat_B).begin(), len_b, rand_gen); 
 # 94
+} 
+# 97
+void testGEMM() { 
+# 98
 cudaStream_t stream; 
-# 95 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaStreamCreate(&stream)))) ? (void)0 : __assert_fail("cudaSuccess==cudaStreamCreate(&stream)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 95, __extension__ __PRETTY_FUNCTION__); 
-# 98 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+# 99 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>((cudaSuccess) == (cudaStreamCreate(&stream)))) ? (void)0 : __assert_fail("cudaSuccess==cudaStreamCreate(&stream)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 99, __extension__ __PRETTY_FUNCTION__); 
+# 102 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
 { 
-# 99
-cpuGEMM< float, float, signed char, signed char> ((h_mat_A).data(), (h_mat_B).data(), (h_mat_C_ref).data(), M, N, K, len_a, len_b, len_c, 1, static_cast< float>(1), static_cast< float>(0), GEMM_OP_T, GEMM_OP_N, GEMM_OP_T); 
 # 103
+cpuGEMM< float, float, int8_t, T> ((h_mat_A).data(), (h_mat_B).data(), (h_mat_C_ref).data(), M, N, K, len_a, len_b, len_c, 1, static_cast< float>(1), static_cast< float>(0), GEMM_OP_T, GEMM_OP_N, GEMM_OP_T); 
+# 107
 } 
-# 105 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaMalloc(&(d_mat_A), (len_a) * sizeof(int8_t))))) ? (void)0 : __assert_fail("cudaSuccess==cudaMalloc(&d_mat_A, len_a * sizeof(int8_t))", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 105, __extension__ __PRETTY_FUNCTION__); 
-# 106 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaMalloc(&(d_mat_B), (len_b) * sizeof(int8_t))))) ? (void)0 : __assert_fail("cudaSuccess==cudaMalloc(&d_mat_B, len_b * sizeof(int8_t))", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 106, __extension__ __PRETTY_FUNCTION__); 
-# 107 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaMalloc(&(d_mat_C), (len_c) * sizeof(int8_t))))) ? (void)0 : __assert_fail("cudaSuccess==cudaMalloc(&d_mat_C, len_c * sizeof(int8_t))", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 107, __extension__ __PRETTY_FUNCTION__); 
 # 109 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaMemcpy(d_mat_A, (h_mat_A).data(), (len_a) * sizeof(int8_t), cudaMemcpyHostToDevice)))) ? (void)0 : __assert_fail("cudaSuccess==cudaMemcpy(d_mat_A, h_mat_A.data(), len_a * sizeof(int8_t), cudaMemcpyHostToDevice)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 109, __extension__ __PRETTY_FUNCTION__); 
+(static_cast< bool>((cudaSuccess) == (cudaMalloc(&(d_mat_A), (len_a) * (sizeof(int8_t)))))) ? (void)0 : __assert_fail("cudaSuccess==cudaMalloc(&d_mat_A, len_a * sizeof(int8_t))", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 109, __extension__ __PRETTY_FUNCTION__); 
 # 110 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaMemcpy(d_mat_B, (h_mat_B).data(), (len_b) * sizeof(int8_t), cudaMemcpyHostToDevice)))) ? (void)0 : __assert_fail("cudaSuccess==cudaMemcpy(d_mat_B, h_mat_B.data(), len_b * sizeof(int8_t), cudaMemcpyHostToDevice)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 110, __extension__ __PRETTY_FUNCTION__); 
+(static_cast< bool>((cudaSuccess) == (cudaMalloc(&(d_mat_B), (len_b) * (sizeof(int8_t)))))) ? (void)0 : __assert_fail("cudaSuccess==cudaMalloc(&d_mat_B, len_b * sizeof(int8_t))", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 110, __extension__ __PRETTY_FUNCTION__); 
 # 111 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaMemset(d_mat_C, 0, (len_c) * sizeof(int8_t))))) ? (void)0 : __assert_fail("cudaSuccess==cudaMemset(d_mat_C, 0, len_c * sizeof(int8_t))", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 111, __extension__ __PRETTY_FUNCTION__); 
-# 116 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+(static_cast< bool>(cudaSuccess == cudaMalloc(&(d_mat_C), (len_c) * (sizeof(T))))) ? (void)0 : __assert_fail("cudaSuccess==cudaMalloc(&d_mat_C, len_c * sizeof(T))", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 111, __extension__ __PRETTY_FUNCTION__); 
+# 113 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>((cudaSuccess) == (cudaMemcpy(d_mat_A, (h_mat_A).data(), (len_a) * (sizeof(int8_t)), cudaMemcpyHostToDevice)))) ? (void)0 : __assert_fail("cudaSuccess==cudaMemcpy(d_mat_A, h_mat_A.data(), len_a * sizeof(int8_t), cudaMemcpyHostToDevice)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 113, __extension__ __PRETTY_FUNCTION__); 
+# 114 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>((cudaSuccess) == (cudaMemcpy(d_mat_B, (h_mat_B).data(), (len_b) * (sizeof(int8_t)), cudaMemcpyHostToDevice)))) ? (void)0 : __assert_fail("cudaSuccess==cudaMemcpy(d_mat_B, h_mat_B.data(), len_b * sizeof(int8_t), cudaMemcpyHostToDevice)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 114, __extension__ __PRETTY_FUNCTION__); 
+# 115 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>(cudaSuccess == cudaMemset(d_mat_C, 0, (len_c) * (sizeof(T))))) ? (void)0 : __assert_fail("cudaSuccess==cudaMemset(d_mat_C, 0, len_c * sizeof(T))", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 115, __extension__ __PRETTY_FUNCTION__); 
+# 120 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
 float milliseconds = (0.0F); 
-# 117
+# 121
 cudaEvent_t start, stop; 
-# 118
-cudaEventCreate(&start); 
-# 119
-cudaEventCreate(&stop); 
-# 120
-cudaEventRecord(start, stream); 
 # 122
-{ 
+cudaEventCreate(&start); 
 # 123
-if (use_tcu) { GEMMI8< true> (stream, d_mat_A, d_mat_B, d_mat_C, M, N, K, trans_a, trans_b, trans_c); }  
+cudaEventCreate(&stop); 
 # 124
-} 
+cudaEventRecord(start, stream); 
 # 126
-cudaEventRecord(stop, stream); 
+{ 
 # 127
-cudaEventSynchronize(stop); 
+if (use_tcu) { GEMMI8< true, T> (stream, d_mat_A, d_mat_B, d_mat_C, M, N, K, trans_a, trans_b, trans_c); }  
 # 128
-cudaEventElapsedTime(&milliseconds, start, stop); 
-# 130
-double flops = ((double)((((M) * (N)) * (K)) * 2)) * (1.0); 
-# 131
-double gigaFlops = (flops * ((1.0E-9F))) / (milliseconds / (1000.0F)); 
-# 132
-double bandWidth = (((double)(((len_a) + (len_b)) + (len_c))) * (sizeof(int8_t))) / ((milliseconds * (1000)) * (1000)); 
-# 133
-printf("\033[31;47m INT8 GEMM took %.3f ms, %.2f GFlop/s, %.2f GB/s \033[0m\n", milliseconds, gigaFlops, bandWidth); 
-# 134 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaDeviceSynchronize()))) ? (void)0 : __assert_fail("cudaSuccess==cudaDeviceSynchronize()", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 134, __extension__ __PRETTY_FUNCTION__); 
-# 135 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaEventDestroy(start)))) ? (void)0 : __assert_fail("cudaSuccess==cudaEventDestroy(start)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 135, __extension__ __PRETTY_FUNCTION__); 
-# 136 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaEventDestroy(stop)))) ? (void)0 : __assert_fail("cudaSuccess==cudaEventDestroy(stop)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 136, __extension__ __PRETTY_FUNCTION__); 
-# 137 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaMemcpy((h_mat_C).data(), d_mat_C, (len_c) * sizeof(int8_t), cudaMemcpyDeviceToHost)))) ? (void)0 : __assert_fail("cudaSuccess==cudaMemcpy(h_mat_C.data(), d_mat_C, len_c * sizeof(int8_t), cudaMemcpyDeviceToHost)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 137, __extension__ __PRETTY_FUNCTION__); 
-# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaFree(d_mat_A)))) ? (void)0 : __assert_fail("cudaSuccess==cudaFree(d_mat_A)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 139, __extension__ __PRETTY_FUNCTION__); 
-# 140 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaFree(d_mat_B)))) ? (void)0 : __assert_fail("cudaSuccess==cudaFree(d_mat_B)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 140, __extension__ __PRETTY_FUNCTION__); 
-# 141 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaFree(d_mat_C)))) ? (void)0 : __assert_fail("cudaSuccess==cudaFree(d_mat_C)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 141, __extension__ __PRETTY_FUNCTION__); 
-# 142 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
-(static_cast< bool>((cudaSuccess) == (cudaStreamDestroy(stream)))) ? (void)0 : __assert_fail("cudaSuccess==cudaStreamDestroy(stream)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 142, __extension__ __PRETTY_FUNCTION__); 
-# 144 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
-print_vec((h_mat_C).data(), "h_mat_C: ", 0, N, N); 
-# 145
-print_vec((h_mat_C_ref).data(), "h_mat_C_ref: ", 0, N, N); 
-# 147
-if (((h_mat_C) == (h_mat_C_ref))) { 
-# 148
-(((cout << ("test passed !"))) << (endl)); 
-# 149
-} else { 
-# 150
-(((cout << ("test failed !"))) << (endl)); 
-# 151
-}  
-# 152
 } 
+# 130
+cudaEventRecord(stop, stream); 
+# 131
+cudaEventSynchronize(stop); 
+# 132
+cudaEventElapsedTime(&milliseconds, start, stop); 
+# 134
+double flops = ((((static_cast< double>(M)) * (static_cast< double>(N))) * (static_cast< double>(K))) * (2)) * (1.0); 
+# 135
+double gigaFlops = (flops * ((1.0E-9F))) / (milliseconds / (1000.0F)); 
+# 136
+double bandWidth = (((static_cast< double>((len_a) + (len_b))) * (sizeof(int8_t))) + ((static_cast< double>(len_c)) * (sizeof(T)))) / ((milliseconds * (1000)) * (1000)); 
+# 137
+printf("\033[31;47m INT8 GEMM took %.3f ms, %.2f GFlop/s, %.2f GB/s \033[0m\n", milliseconds, gigaFlops, bandWidth); 
+# 138 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>((cudaSuccess) == (cudaDeviceSynchronize()))) ? (void)0 : __assert_fail("cudaSuccess==cudaDeviceSynchronize()", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 138, __extension__ __PRETTY_FUNCTION__); 
+# 139 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>((cudaSuccess) == (cudaEventDestroy(start)))) ? (void)0 : __assert_fail("cudaSuccess==cudaEventDestroy(start)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 139, __extension__ __PRETTY_FUNCTION__); 
+# 140 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>((cudaSuccess) == (cudaEventDestroy(stop)))) ? (void)0 : __assert_fail("cudaSuccess==cudaEventDestroy(stop)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 140, __extension__ __PRETTY_FUNCTION__); 
+# 141 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>(cudaSuccess == cudaMemcpy((h_mat_C).data(), d_mat_C, (len_c) * (sizeof(T)), cudaMemcpyDeviceToHost))) ? (void)0 : __assert_fail("cudaSuccess==cudaMemcpy(h_mat_C.data(), d_mat_C, len_c * sizeof(T), cudaMemcpyDeviceToHost)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 141, __extension__ __PRETTY_FUNCTION__); 
+# 143 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>((cudaSuccess) == (cudaFree(d_mat_A)))) ? (void)0 : __assert_fail("cudaSuccess==cudaFree(d_mat_A)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 143, __extension__ __PRETTY_FUNCTION__); 
+# 144 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>((cudaSuccess) == (cudaFree(d_mat_B)))) ? (void)0 : __assert_fail("cudaSuccess==cudaFree(d_mat_B)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 144, __extension__ __PRETTY_FUNCTION__); 
+# 145 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>(cudaSuccess == cudaFree(d_mat_C))) ? (void)0 : __assert_fail("cudaSuccess==cudaFree(d_mat_C)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 145, __extension__ __PRETTY_FUNCTION__); 
+# 146 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu" 3
+(static_cast< bool>((cudaSuccess) == (cudaStreamDestroy(stream)))) ? (void)0 : __assert_fail("cudaSuccess==cudaStreamDestroy(stream)", "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu", 146, __extension__ __PRETTY_FUNCTION__); 
+# 148 "/home/poweruser/junda.feng/CUDA-INT8-GEMM/test_gemm_i8.cu"
+print_vec((h_mat_C).data(), "h_mat_C: ", 0, 32, N); 
+# 149
+print_vec((h_mat_C_ref).data(), "h_mat_C_ref: ", 0, 32, N); 
+# 151
+if ((h_mat_C) == (h_mat_C_ref)) { 
+# 152
+(((cout << ("test passed !"))) << (endl)); 
+# 153
+} else { 
+# 154
+(((cout << ("test failed !"))) << (endl)); 
+# 155
+}  
 # 156
+} 
+# 160
 protected: bool use_tcu; 
-# 157
-int M, N, K; 
-# 158
-int len_a, len_b, len_c; 
-# 159
-bool trans_a, trans_b, trans_c; 
 # 161
-std::vector< signed char>  h_mat_A; 
+int M, N, K; 
 # 162
-std::vector< signed char>  h_mat_B; 
+long long len_a, len_b, len_c; 
 # 163
-std::vector< signed char>  h_mat_C; 
-# 164
-std::vector< signed char>  h_mat_C_ref; 
+bool trans_a, trans_b, trans_c; 
+# 165
+std::vector< int8_t>  h_mat_A; 
 # 166
-int8_t *d_mat_A; 
+std::vector< int8_t>  h_mat_B; 
 # 167
-int8_t *d_mat_B; 
+std::vector< T>  h_mat_C; 
 # 168
-int8_t *d_mat_C; 
-# 169
-}; 
+std::vector< T>  h_mat_C_ref; 
+# 170
+int8_t *d_mat_A; 
+# 171
+int8_t *d_mat_B; 
 # 172
-int main(int argc, char **argv) { 
+T *d_mat_C; 
 # 173
-int M = 256; 
-# 174
-int N = 256; 
-# 175
-int K = 32; 
-# 177
-bool trans_a = GEMM_OP_T; 
+}; 
+# 176
+int main(int argc, char **argv) { 
 # 178
-bool trans_b = GEMM_OP_N; 
+int M = 256; 
 # 179
-bool trans_c = GEMM_OP_T; 
-# 181
-bool use_tcu = true; 
+int N = 256; 
+# 180
+int K = 32; 
+# 182
+bool trans_a = GEMM_OP_T; 
 # 183
-if (argc > 1) { 
+bool trans_b = GEMM_OP_N; 
 # 184
-M = atoi(argv[1]); 
-# 185
-}  
+bool trans_c = GEMM_OP_T; 
 # 186
-if (argc > 2) { 
+bool use_tcu = true; 
 # 187
-N = atoi(argv[2]); 
-# 188
-}  
+bool output_i8 = true; 
 # 189
-if (argc > 3) { 
+if (argc > 1) { 
 # 190
-K = atoi(argv[3]); 
+M = atoi(argv[1]); 
 # 191
 }  
 # 192
-if (argc > 4) { 
+if (argc > 2) { 
 # 193
-trans_a = (atoi(argv[4])); 
+N = atoi(argv[2]); 
 # 194
 }  
 # 195
-if (argc > 5) { 
+if (argc > 3) { 
 # 196
-trans_b = (atoi(argv[5])); 
+K = atoi(argv[3]); 
 # 197
 }  
 # 198
-if (argc > 6) { 
+if (argc > 4) { 
 # 199
-trans_c = (atoi(argv[6])); 
+trans_a = (atoi(argv[4])); 
 # 200
 }  
+# 201
+if (argc > 5) { 
+# 202
+trans_b = (atoi(argv[5])); 
+# 203
+}  
 # 204
-GEMM gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c); 
+if (argc > 6) { 
 # 205
-gemm.testGEMM(); 
+trans_c = (atoi(argv[6])); 
+# 206
+}  
 # 207
-return 0; 
+if (argc > 7) { 
 # 208
+use_tcu = (atoi(argv[7])); 
+# 209
+}  
+# 210
+if (argc > 8) { 
+# 211
+output_i8 = (atoi(argv[8])); 
+# 212
+}  
+# 214
+if (output_i8) 
+# 215
+{ 
+# 216
+GEMM< signed char>  gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c); 
+# 217
+gemm.testGEMM(); 
+# 218
+} else 
+# 219
+{ 
+# 220
+GEMM< int>  gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c); 
+# 221
+gemm.testGEMM(); 
+# 222
+}  
+# 224
+return 0; 
+# 225
 } 
 
 # 1 "test_gemm_i8.cudafe1.stub.c"
