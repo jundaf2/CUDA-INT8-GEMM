@@ -1,3 +1,0 @@
-/home/poweruser/junda.feng/CUDA-INT8-GEMM/build/CMakeFiles/test_gemm_i8.dir
-/home/poweruser/junda.feng/CUDA-INT8-GEMM/build/CMakeFiles/edit_cache.dir
-/home/poweruser/junda.feng/CUDA-INT8-GEMM/build/CMakeFiles/rebuild_cache.dir
