@@ -1,0 +1,1 @@
+  -L/home/poweruser/junda.feng/anaconda3/lib64  -Wl,-rpath,/home/poweruser/junda.feng/anaconda3/lib64 /home/poweruser/junda.feng/anaconda3/lib/libcudart_static.a -ldl "/usr/lib/x86_64-linux-gnu/librt.so" -lpthread -lcudadevrt -lcudart_static -lrt -lpthread -ldl 

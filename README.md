@@ -13,7 +13,11 @@ You may undersand the `T` and `N` in these flags as either `transpose` / `non-tr
 
 The output type can be either `int8` or `int32` depending on your usage. For example, when you use GEMM in a 8-bit framework, you may want to use `int8` output as the input of next layer's operation. The tensor core itself uses `int32` as accumalator, which is the same as the cuBLAS library.
 
-Current
+Performance is quite poor due to
+* the unsolved bank conflict when loading the data from shared memory to register.
+* unoptimized global memory write.
+
+Currently,
 ``` example cmd for int8 output:
     ./test_gemm_i8 1024 1024 32 1 0 1 1 1
 ```
