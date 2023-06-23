@@ -24,15 +24,15 @@ void GEMMI8(cudaStream_t stream,
             int M, int N, int K,
             bool transA, bool transB, bool transC) 
 {
-  constexpr int BLOCK_M = 256;
-  constexpr int BLOCK_N = 256;
+  constexpr int BLOCK_M = 128;
+  constexpr int BLOCK_N = 128;
   constexpr int BLOCK_K = 32;
-  constexpr int WARP_M = 64;
-  constexpr int WARP_N = 64;
+  constexpr int WARP_M = 32;
+  constexpr int WARP_N = 32;
   constexpr int WARP_SIZE = 32;
 
   dim3 block((BLOCK_M / WARP_M) * (BLOCK_N / WARP_N) * WARP_SIZE, 1, 1);   
-  dim3 grid((N + BLOCK_N - 1) / BLOCK_N / 1, (M + BLOCK_M - 1) / BLOCK_M);  
+  dim3 grid((N + BLOCK_N - 1) / BLOCK_N, (M + BLOCK_M - 1) / BLOCK_M);  
   
   if(transA==GEMM_OP_T && transB==GEMM_OP_N && transC==GEMM_OP_T)
     kernel::GEMMI8TCU<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, 2, GEMM_OP_T, GEMM_OP_N, GEMM_OP_T><<<grid, block, 0, stream>>>(A, B, C, M, N, K);
@@ -115,6 +115,9 @@ public:
     ASSERT_CUDA(cudaMemset(d_mat_C, 0, len_c * sizeof(T)));
 
     // warp up the device
+    {  
+      if(use_tcu) GEMMI8<true, T>(stream, d_mat_A, d_mat_B, d_mat_C, M, N, K, trans_a, trans_b, trans_c);
+    }
 
     // time it
     float milliseconds = 0.0f;
@@ -132,9 +135,9 @@ public:
     cudaEventElapsedTime(&milliseconds , start, stop);
     
     double   flops = static_cast<double>(M)*static_cast<double>(N)*static_cast<double>(K)*2*1.0;
-    double   gigaFlops = (flops * 1.0e-9f) / (milliseconds  / 1000.0f);
+    double   tetraFlops = (flops * 1.0e-12f) / (milliseconds  / 1000.0f);
     double   bandWidth = (static_cast<double>(len_a+len_b)*sizeof(int8_t)+static_cast<double>(len_c)*sizeof(T)) / (milliseconds  * 1000 * 1000);
-    printf("\033[31;47m INT8 GEMM took %.3f ms, %.2f GFlop/s, %.2f GB/s \033[0m\n", milliseconds , gigaFlops, bandWidth);
+    printf("\033[31;47m INT8 GEMM took %.6f ms, %.2f T OP/s, %.2f GB/s \033[0m\n", milliseconds , tetraFlops, bandWidth);
     ASSERT_CUDA(cudaDeviceSynchronize());
     ASSERT_CUDA(cudaEventDestroy(start));
     ASSERT_CUDA(cudaEventDestroy(stop));
