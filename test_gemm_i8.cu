@@ -187,7 +187,6 @@ int main(int argc, char **argv) {
   bool trans_c = GEMM_OP_T;
 
   bool use_tcu = true;
-  bool output_i8 = true;
 
   if(argc > 1) {
     M = atoi(argv[1]);
@@ -210,19 +209,11 @@ int main(int argc, char **argv) {
   if(argc > 7) {
     use_tcu = atoi(argv[7]);
   }
-  if(argc > 8) {
-    output_i8 = atoi(argv[8]);
-  }
 
-  if(output_i8)
-  {
-    GEMM<int8_t> gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c);
-    gemm.testGEMM();
-  }
-  else{
-    GEMM<int> gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c);
-    gemm.testGEMM();
-  }
+
+  GEMM<int8_t> gemm(use_tcu, M, N, K, trans_a, trans_b, trans_c);
+  gemm.testGEMM();
+
 
   return 0;
 }
