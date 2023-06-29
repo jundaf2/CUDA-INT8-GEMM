@@ -14,7 +14,7 @@ constexpr bool GEMM_OP_N = false;
 using namespace nvcuda;
 namespace cg = cooperative_groups;
 
-namespace kernel{
+namespace wmma_kernel{
 
   
 template <int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int WARP_SIZE_M, int WARP_SIZE_N, int STAGE, bool NoTransA, bool NoTransB, bool RowMajorC>
@@ -285,4 +285,173 @@ __global__ void GEMMI8TCU(const int8_t* A, const int8_t* B, int8_t* C, int M, in
 }                                
 
 
+}
+
+
+namespace cutlass_kernel{
+
+template <int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, int WARP_SIZE_M, int WARP_SIZE_N, int STAGE, bool NoTransA, bool NoTransB, bool RowMajorC>
+__global__ void GEMMI8TCU(const int8_t* A, const int8_t* B, int8_t* C, int M, int N, int K)
+{
+
+  constexpr int WARP_SIZE = 32;
+  constexpr int TC_SIZE = 16;
+  constexpr int CP_SIZE_BYTES = 16;
+  constexpr int WAPR_NUM_N = BLOCK_SIZE_N / WARP_SIZE_N;
+  constexpr int WAPR_NUM_M = BLOCK_SIZE_M / WARP_SIZE_M;
+  constexpr int WAPR_NUM     = WAPR_NUM_M * WAPR_NUM_N;
+
+  static_assert(NoTransA == GEMM_OP_T, "NoTransA == GEMM_OP_T");
+  static_assert(NoTransB == GEMM_OP_N, "NoTransB == GEMM_OP_N");
+  static_assert(RowMajorC == GEMM_OP_T, "RowMajorC == GEMM_OP_T");
+
+  int warp_id = threadIdx.x/WARP_SIZE;
+  int lane_id = threadIdx.x%WARP_SIZE;
+
+  __shared__ int8_t SLB[STAGE * (BLOCK_SIZE_K*BLOCK_SIZE_M + BLOCK_SIZE_K*BLOCK_SIZE_N)];
+
+  int8_t* smem_a[2];
+  int8_t* smem_b[2];
+
+  smem_a[0] = SLB;
+  smem_a[1] = SLB + BLOCK_SIZE_K*BLOCK_SIZE_M;
+  smem_b[0] = SLB + STAGE*BLOCK_SIZE_K*BLOCK_SIZE_M;
+  smem_b[1] = SLB + STAGE*BLOCK_SIZE_K*BLOCK_SIZE_M + BLOCK_SIZE_K*BLOCK_SIZE_N;
+
+  const int BCM = BLOCK_SIZE_M * blockIdx.y;
+  const int BCN = BLOCK_SIZE_N * blockIdx.x;
+
+  const int LDA = NoTransA ? K : M;
+  const int LDB = NoTransB ? N : K;
+  const int LDC = RowMajorC ? N : M;
+
+  const int WCM = warp_id / WAPR_NUM_N;
+  const int WCN = warp_id % WAPR_NUM_N;
+
+  const int BLOCK_K_LOOP = K / BLOCK_SIZE_K;
+
+  const int8_t* BA = A + BCM * LDA;
+  const int8_t* BB = B + BCN * LDB;
+  int8_t* BC = C + BCM * LDC + BCN;
+  int8_t* BWC = BC + WCM * WARP_SIZE_M * LDC + WCN * WARP_SIZE_N;
+
+  constexpr int WARP_M_LOOP = WARP_SIZE_M / TC_SIZE;
+  constexpr int WARP_N_LOOP = WARP_SIZE_N / TC_SIZE;
+  constexpr int WARP_K_LOOP = BLOCK_SIZE_K / TC_SIZE;
+
+  wmma::fragment<wmma::matrix_a, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::row_major> frag_a;
+  wmma::fragment<wmma::matrix_b, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::col_major> frag_b;
+  wmma::fragment<wmma::accumulator, TC_SIZE, TC_SIZE, TC_SIZE, int> frag_c[WARP_M_LOOP][WARP_N_LOOP];
+
+  #pragma unroll
+  for (int i = 0; i < WARP_M_LOOP; i++) {
+      #pragma unroll
+      for (int j = 0; j < WARP_N_LOOP; j++) {
+          wmma::fill_fragment(frag_c[i][j], 0);
+      }
+  }  
+
+  constexpr int WARP_SIZE_X = 2;
+  int lane_id_x = lane_id % (WARP_SIZE_X); // [0,2]
+  int lane_id_y = lane_id / (WARP_SIZE_X); // [0,16]
+
+  const int8_t* load_gmem_addr_a, *load_gmem_addr_b;
+  int store_smem_addr_a, store_smem_addr_b;
+  int k;
+
+  k = 0;
+
+  #pragma unroll
+  for(int j = 0; j < BLOCK_SIZE_K/(CP_SIZE_BYTES*WARP_SIZE_X); j++){
+    #pragma unroll
+    for(int i=warp_id; i<(BLOCK_SIZE_M/TC_SIZE); i+=WAPR_NUM)
+    {
+      load_gmem_addr_a = BA + (i*TC_SIZE + lane_id_y) * LDA + k*BLOCK_SIZE_K + j*(CP_SIZE_BYTES*WARP_SIZE_X) + lane_id_x*CP_SIZE_BYTES;
+      store_smem_addr_a = __cvta_generic_to_shared(smem_a[k%2] + (i*TC_SIZE + lane_id_y)*BLOCK_SIZE_K + j*(CP_SIZE_BYTES*WARP_SIZE_X) + lane_id_x*CP_SIZE_BYTES);
+      asm volatile("cp.async.ca.shared.global [%0], [%1], %2;\n" :: "r"(store_smem_addr_a), "l"(load_gmem_addr_a), "n"(CP_SIZE_BYTES));
+    }
+    
+    #pragma unroll
+    for(int i=warp_id; i<(BLOCK_SIZE_N/TC_SIZE); i+=WAPR_NUM)
+    {
+      load_gmem_addr_b = BB + (i*TC_SIZE + lane_id_y) * LDB + k*BLOCK_SIZE_K + j*(CP_SIZE_BYTES*WARP_SIZE_X) + lane_id_x*CP_SIZE_BYTES;
+      store_smem_addr_b = __cvta_generic_to_shared(smem_b[k%2] + (i*TC_SIZE + lane_id_y)*BLOCK_SIZE_K + j*(CP_SIZE_BYTES*WARP_SIZE_X) + lane_id_x*CP_SIZE_BYTES);
+      asm volatile("cp.async.ca.shared.global [%0], [%1], %2;\n" :: "r"(store_smem_addr_b), "l"(load_gmem_addr_b), "n"(CP_SIZE_BYTES));
+    }
+  }
+
+  #pragma unroll
+  for(k=1; k<BLOCK_K_LOOP; k++){
+    asm ("cp.async.commit_group;\n" ::);
+    asm ("cp.async.wait_group 0;\n" ::);
+    __syncthreads();
+
+    #pragma unroll
+    for(int j = 0; j < BLOCK_SIZE_K/(CP_SIZE_BYTES*WARP_SIZE_X); j++){
+      #pragma unroll
+      for(int i=warp_id; i<(BLOCK_SIZE_M/TC_SIZE); i+=WAPR_NUM)
+      {
+        load_gmem_addr_a = BA + (i*TC_SIZE + lane_id_y) * LDA + k*BLOCK_SIZE_K + j*(CP_SIZE_BYTES*WARP_SIZE_X) + lane_id_x*CP_SIZE_BYTES;
+        store_smem_addr_a = __cvta_generic_to_shared(smem_a[k%2] + (i*TC_SIZE + lane_id_y)*BLOCK_SIZE_K + j*(CP_SIZE_BYTES*WARP_SIZE_X) + lane_id_x*CP_SIZE_BYTES);
+        asm volatile("cp.async.ca.shared.global [%0], [%1], %2;\n" :: "r"(store_smem_addr_a), "l"(load_gmem_addr_a), "n"(CP_SIZE_BYTES));
+      }
+      
+      #pragma unroll
+      for(int i=warp_id; i<(BLOCK_SIZE_N/TC_SIZE); i+=WAPR_NUM)
+      {
+        load_gmem_addr_b = BB + (i*TC_SIZE + lane_id_y) * LDB + k*BLOCK_SIZE_K + j*(CP_SIZE_BYTES*WARP_SIZE_X) + lane_id_x*CP_SIZE_BYTES;
+        store_smem_addr_b = __cvta_generic_to_shared(smem_b[k%2] + (i*TC_SIZE + lane_id_y)*BLOCK_SIZE_K + j*(CP_SIZE_BYTES*WARP_SIZE_X) + lane_id_x*CP_SIZE_BYTES);
+        asm volatile("cp.async.ca.shared.global [%0], [%1], %2;\n" :: "r"(store_smem_addr_b), "l"(load_gmem_addr_b), "n"(CP_SIZE_BYTES));
+      }
+    }
+
+    #pragma unroll
+    for(int ki=0; ki<WARP_K_LOOP; ki++)
+      #pragma unroll
+      for(int yi=0; yi<WARP_M_LOOP; yi++){
+        wmma::load_matrix_sync(frag_a, &smem_a[(k-1)%2][(WCM*WARP_SIZE_M+yi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+        #pragma unroll
+        for(int xi=0; xi<WARP_N_LOOP; xi++){
+          wmma::load_matrix_sync(frag_b, &smem_b[(k-1)%2][(WCN*WARP_SIZE_N+xi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+          wmma::mma_sync(frag_c[yi][xi], frag_a, frag_b, frag_c[yi][xi]);
+        }
+      }
+  }
+
+  asm ("cp.async.commit_group;\n" ::);
+  asm ("cp.async.wait_group 0;\n" ::);
+  __syncthreads();
+
+  k = BLOCK_K_LOOP -1;
+  #pragma unroll
+  for(int ki=0; ki<WARP_K_LOOP; ki++)
+    #pragma unroll
+    for(int yi=0; yi<WARP_M_LOOP; yi++){
+      wmma::load_matrix_sync(frag_a, &smem_a[(k)%2][(WCM*WARP_SIZE_M+yi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+      #pragma unroll
+      for(int xi=0; xi<WARP_N_LOOP; xi++){
+        wmma::load_matrix_sync(frag_b, &smem_b[(k)%2][(WCN*WARP_SIZE_N+xi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+        wmma::mma_sync(frag_c[yi][xi], frag_a, frag_b, frag_c[yi][xi]);
+      }
+    }
+
+  int gmem_lane_id_x = lane_id % 4; // [0,4]
+  int gmem_lane_id_y = lane_id / 4; // [0 8]
+  #pragma unroll
+  for(int yi=0; yi<WARP_M_LOOP; yi++)
+    #pragma unroll
+    for(int xi=0; xi<WARP_N_LOOP; xi++)
+    {
+      for(int tc_yi=0; tc_yi<2; tc_yi++){
+        for(int tc_xi=0; tc_xi<2; tc_xi++){
+          auto* store_gmem_addr = reinterpret_cast<char2*>(BWC + (yi*TC_SIZE + tc_yi*TC_SIZE/2 + gmem_lane_id_y) * LDC + xi*TC_SIZE + tc_xi*TC_SIZE/2 + gmem_lane_id_x*2);
+          char2 tmp_char2;
+          tmp_char2.x = static_cast<int8_t>(frag_c[yi][xi].x[tc_xi*4+tc_yi*2+0]); 
+          tmp_char2.y = static_cast<int8_t>(frag_c[yi][xi].x[tc_xi*4+tc_yi*2+1]);
+          *store_gmem_addr = tmp_char2; 
+        }
+      }
+    }
+}
+  
 }

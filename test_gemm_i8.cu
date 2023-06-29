@@ -35,7 +35,7 @@ void GEMMI8(cudaStream_t stream,
   dim3 grid((N + BLOCK_N - 1) / BLOCK_N, (M + BLOCK_M - 1) / BLOCK_M);  
   
   if(transA==GEMM_OP_T && transB==GEMM_OP_N && transC==GEMM_OP_T)
-    kernel::GEMMI8TCU<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, 2, GEMM_OP_T, GEMM_OP_N, GEMM_OP_T><<<grid, block, 0, stream>>>(A, B, C, M, N, K);
+    wmma_kernel::GEMMI8TCU<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, 2, GEMM_OP_T, GEMM_OP_N, GEMM_OP_T><<<grid, block, 0, stream>>>(A, B, C, M, N, K);
   
 }
 
@@ -141,6 +141,7 @@ public:
     ASSERT_CUDA(cudaDeviceSynchronize());
     ASSERT_CUDA(cudaEventDestroy(start));
     ASSERT_CUDA(cudaEventDestroy(stop));
+    
     ASSERT_CUDA(cudaMemcpy(h_mat_C.data(), d_mat_C, len_c * sizeof(T), cudaMemcpyDeviceToHost));
     
     ASSERT_CUDA(cudaFree(d_mat_A));
