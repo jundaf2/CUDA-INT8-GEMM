@@ -169,8 +169,8 @@ __global__ void GEMMI8TCU(const int8_t* A, const int8_t* B, int8_t* C, int M, in
   constexpr int WARP_N_LOOP = WARP_SIZE_N / TC_SIZE;
   constexpr int WARP_K_LOOP = BLOCK_SIZE_K / TC_SIZE;
 
-  wmma::fragment<wmma::matrix_a, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::row_major> frag_a;
-  wmma::fragment<wmma::matrix_b, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::col_major> frag_b;
+  wmma::fragment<wmma::matrix_a, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::row_major> frag_a[WARP_M_LOOP][WARP_K_LOOP];
+  wmma::fragment<wmma::matrix_b, TC_SIZE, TC_SIZE, TC_SIZE, int8_t, wmma::col_major> frag_b[WARP_K_LOOP][WARP_N_LOOP];
   wmma::fragment<wmma::accumulator, TC_SIZE, TC_SIZE, TC_SIZE, int> frag_c[WARP_M_LOOP][WARP_N_LOOP];
 
   #pragma unroll
@@ -236,14 +236,28 @@ __global__ void GEMMI8TCU(const int8_t* A, const int8_t* B, int8_t* C, int M, in
     }
 
     #pragma unroll
+    for(int yi=0; yi<WARP_M_LOOP; yi++){
+      #pragma unroll
+        for(int ki=0; ki<WARP_K_LOOP; ki++){
+          wmma::load_matrix_sync(frag_a[yi][ki], &smem_a[(k-1)%2][(WCM*WARP_SIZE_M+yi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+        }
+    }
+
+    #pragma unroll
+    for(int ki=0; ki<WARP_K_LOOP; ki++){
+      #pragma unroll
+        for(int xi=0; xi<WARP_N_LOOP; xi++){
+          wmma::load_matrix_sync(frag_b[ki][xi], &smem_b[(k-1)%2][(WCN*WARP_SIZE_N+xi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+        }
+    }
+
+    #pragma unroll
     for(int ki=0; ki<WARP_K_LOOP; ki++)
       #pragma unroll
       for(int yi=0; yi<WARP_M_LOOP; yi++){
-        wmma::load_matrix_sync(frag_a, &smem_a[(k-1)%2][(WCM*WARP_SIZE_M+yi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
         #pragma unroll
         for(int xi=0; xi<WARP_N_LOOP; xi++){
-          wmma::load_matrix_sync(frag_b, &smem_b[(k-1)%2][(WCN*WARP_SIZE_N+xi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
-          wmma::mma_sync(frag_c[yi][xi], frag_a, frag_b, frag_c[yi][xi]);
+          wmma::mma_sync(frag_c[yi][xi], frag_a[yi][ki], frag_b[ki][xi], frag_c[yi][xi]);
         }
       }
   }
@@ -254,14 +268,28 @@ __global__ void GEMMI8TCU(const int8_t* A, const int8_t* B, int8_t* C, int M, in
 
   k = BLOCK_K_LOOP -1;
   #pragma unroll
+  for(int yi=0; yi<WARP_M_LOOP; yi++){
+    #pragma unroll
+      for(int ki=0; ki<WARP_K_LOOP; ki++){
+        wmma::load_matrix_sync(frag_a[yi][ki], &smem_a[(k)%2][(WCM*WARP_SIZE_M+yi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+      }
+  }
+
+  #pragma unroll
+  for(int ki=0; ki<WARP_K_LOOP; ki++){
+    #pragma unroll
+      for(int xi=0; xi<WARP_N_LOOP; xi++){
+        wmma::load_matrix_sync(frag_b[ki][xi], &smem_b[(k)%2][(WCN*WARP_SIZE_N+xi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
+      }
+  }
+
+  #pragma unroll
   for(int ki=0; ki<WARP_K_LOOP; ki++)
     #pragma unroll
     for(int yi=0; yi<WARP_M_LOOP; yi++){
-      wmma::load_matrix_sync(frag_a, &smem_a[(k)%2][(WCM*WARP_SIZE_M+yi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
       #pragma unroll
       for(int xi=0; xi<WARP_N_LOOP; xi++){
-        wmma::load_matrix_sync(frag_b, &smem_b[(k)%2][(WCN*WARP_SIZE_N+xi*TC_SIZE)*BLOCK_SIZE_K+ki*TC_SIZE], BLOCK_SIZE_K);
-        wmma::mma_sync(frag_c[yi][xi], frag_a, frag_b, frag_c[yi][xi]);
+        wmma::mma_sync(frag_c[yi][xi], frag_a[yi][ki], frag_b[ki][xi], frag_c[yi][xi]);
       }
     }
 
